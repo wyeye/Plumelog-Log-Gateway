@@ -1,0 +1,39 @@
+server:
+  port: 8787
+auth:
+  apiKeys:
+    - name: codex
+      token: ${PLUMELOG_GATEWAY_TOKEN}
+elasticsearch:
+  node: http://127.0.0.1:9200
+  username: ${ES_USERNAME}
+  password: ${ES_PASSWORD}
+  tls:
+    rejectUnauthorized: true
+plumelog:
+  indexMode: day
+  timezone: Asia/Shanghai
+  runIndexPrefix: plume_log_run_
+  traceIndexPrefix: plume_log_trace_
+  fields:
+    time: dtTime
+    app: appName
+    env: env
+    level: logLevel
+    message: content
+    host: serverName
+    traceId: traceId
+    logger: className
+    method: method
+    thread: threadName
+    seq: seq
+limits:
+  maxTimeRangeHours: 24
+  maxLimit: 500
+  contentPreviewChars: 500
+  maxContentTermLength: 200
+  maxContentTerms: 20
+  contextDefaultWindowSeconds: 300
+  contextMaxWindowSeconds: 3600
+meta:
+  defaultTimeRangeHours: 24
