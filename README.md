@@ -54,6 +54,46 @@ rtk npm install
 rtk env PLUMELOG_GATEWAY_TOKEN=test ES_USERNAME=elastic ES_PASSWORD=secret npm run dev
 ```
 
+## Docker 构建与运行
+
+构建生产镜像：
+
+```bash
+rtk docker build -t plumelog-log-gateway:local .
+```
+
+使用镜像内默认 `config.yaml` 运行：
+
+```bash
+rtk docker run --rm -p 8787:8787 \
+  -e PLUMELOG_GATEWAY_TOKEN=test \
+  -e ES_USERNAME=elastic \
+  -e ES_PASSWORD=secret \
+  plumelog-log-gateway:local
+```
+
+使用外部挂载 `config.yaml` 运行：
+
+```bash
+rtk docker run --rm -p 8787:8787 \
+  -e PLUMELOG_GATEWAY_TOKEN=test \
+  -e ES_USERNAME=elastic \
+  -e ES_PASSWORD=secret \
+  -e PLUMELOG_CONFIG_PATH=/run/config/plumelog-config.yaml \
+  -v /absolute/path/to/config.yaml:/run/config/plumelog-config.yaml:ro \
+  plumelog-log-gateway:local
+```
+
+健康检查示例：
+
+```bash
+rtk python3 - <<'PY'
+import json
+from urllib.request import urlopen
+print(json.load(urlopen('http://127.0.0.1:8787/health')))
+PY
+```
+
 ## 验证
 
 - 使用临时 `python3` 脚本验证 HTTP API。
