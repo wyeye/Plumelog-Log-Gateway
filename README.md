@@ -56,6 +56,14 @@ rtk env PLUMELOG_GATEWAY_TOKEN=test ES_USERNAME=elastic ES_PASSWORD=secret npm r
 
 ## Docker 构建与运行
 
+推送到 `master` 分支或推送 `v*.*.*` tag 后，GitHub Actions 会自动构建镜像并发布到 GitHub Container Registry：
+
+```txt
+ghcr.io/wyeye/plumelog-log-gateway
+```
+
+`pull_request` 只执行构建校验，不发布镜像。
+
 构建生产镜像：
 
 ```bash
