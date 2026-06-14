@@ -1,0 +1,12 @@
+[mcp_servers.plumelog_gateway]
+command = "node"
+args = ["dist/src/mcp/index.js"]
+cwd = "/root/project/plumelog-mcp"
+env_vars = ["PLUMELOG_GATEWAY_TOKEN"]
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+enabled = true
+required = false
+
+[mcp_servers.plumelog_gateway.env]
+PLUMELOG_GATEWAY_BASE_URL = "http://127.0.0.1:8787"

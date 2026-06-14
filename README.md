@@ -1,17 +1,17 @@
 # Plumelog Log Gateway
 
-面向 Plumelog `3.5.3` 的只读日志查询网关，用于让 Agent / Coding Agent 通过 HTTP API 查询 Elasticsearch 中的 Plumelog 日志。
+面向 Plumelog `3.5.3` 的只读日志查询网关，用于让 Agent / Coding Agent 通过 HTTP API 或 MCP tool 查询 Elasticsearch 中的 Plumelog 日志。
 
 ## 目标
 
-提供稳定、便于 Agent 解析的日志查询层，让 Coding Agent 能够搜索日志、获取上下文、引用排查证据，而不需要直接编写 Elasticsearch DSL。
+提供稳定、便于 Agent 解析的日志查询层，让 Coding Agent 能够搜索日志、获取上下文、引用排查证据，而不需要直接编写 Elasticsearch DSL 或手写 HTTP 请求。
 
 ## 架构
 
 ```txt
 Agent / Codex Skill
         |
-        | JSON over HTTP
+        | MCP / JSON over HTTP
         v
 log-gateway HTTP API
         |
@@ -27,12 +27,12 @@ Elasticsearch / Plumelog indices
 - 支持按应用、环境、级别、traceId、host、logger、method、内容过滤。
 - 按 traceId 或临近时间窗口获取日志上下文。
 - 查询应用列表。
-- 健康检查。
+- 查询最早 / 最晚命中日志边界。
 - Bearer Token / API Key 鉴权。
+- stdio MCP server。
 
 不包含：
 
-- MCP server。
 - Elasticsearch DSL 透传。
 - 日志删除或索引管理。
 - 保留期管理。
@@ -44,14 +44,50 @@ Elasticsearch / Plumelog indices
 - `GET /api/v1/meta/apps`
 - `POST /api/v1/logs/search`
 - `POST /api/v1/logs/context`
+- `POST /api/v1/logs/boundary`
 
-## 本地开发
+`/api/v1/logs/boundary` 示例：
 
-项目内置 `.npmrc`，默认使用国内 npm 源：`https://registry.npmmirror.com/`。
+```json
+{
+  "timeRange": {
+    "from": "2026-06-01T00:00:00+08:00",
+    "to": "2026-06-30T23:59:59+08:00"
+  },
+  "filters": {
+    "apps": ["order-service"],
+    "content": {
+      "any": ["timeout"]
+    }
+  },
+  "direction": "earliest"
+}
+```
+
+## MCP
+
+本项目提供一个很薄的 stdio MCP server，内部调用当前 HTTP 网关。
+
+可用 tools：
+
+- `list_apps`
+- `search_logs`
+- `get_log_context`
+- `find_log_boundary`
+
+本地启动网关：
 
 ```bash
 rtk npm install
 rtk env PLUMELOG_GATEWAY_TOKEN=test ES_USERNAME=elastic ES_PASSWORD=secret npm run dev
+```
+
+本地启动 MCP：
+
+```bash
+rtk env PLUMELOG_GATEWAY_BASE_URL=http://127.0.0.1:8787 \
+  PLUMELOG_GATEWAY_TOKEN=test \
+  npm run mcp
 ```
 
 ## Docker 构建与运行
@@ -104,7 +140,7 @@ PY
 
 ## 验证
 
-- 使用临时 `python3` 脚本验证 HTTP API。
+- 使用临时 `python3` 脚本验证 HTTP API 和 MCP。
 - 不新增 Node 测试文件。
 - 临时验证脚本不得提交。
 
@@ -116,6 +152,7 @@ src/
   config/
   es/
   http/
+  mcp/
   schema/
   utils/
 plumelog-log-query-skill/

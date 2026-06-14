@@ -1,27 +1,11 @@
 import { z } from 'zod';
 import { timeRangeSchema, warningSchema } from './common.js';
-
-const stringArraySchema = z.array(z.string().min(1)).optional();
-
-const contentFilterSchema = z.object({
-  all: stringArraySchema,
-  any: stringArraySchema,
-  not: stringArraySchema,
-}).partial();
+import { logFiltersSchema } from './logFilters.js';
 
 export const searchRequestSchema = z.object({
   timeRange: timeRangeSchema,
   limit: z.number().int().min(1).max(500),
-  filters: z.object({
-    apps: stringArraySchema,
-    envs: stringArraySchema,
-    levels: stringArraySchema,
-    traceIds: stringArraySchema,
-    hosts: stringArraySchema,
-    loggers: stringArraySchema,
-    methods: stringArraySchema,
-    content: contentFilterSchema.optional(),
-  }).default({}),
+  filters: logFiltersSchema,
   cursor: z.string().nullable().optional(),
 });
 
@@ -39,3 +23,5 @@ export const searchResponseSchema = z.object({
   rows: z.array(z.array(z.unknown())),
   warnings: z.array(warningSchema),
 });
+
+export type SearchResponse = z.infer<typeof searchResponseSchema>;

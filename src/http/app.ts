@@ -4,6 +4,7 @@ import { authorizeRequest } from '../auth/authorize.js';
 import { createElasticsearchClient } from '../es/client.js';
 import { PlumelogRepository } from '../es/repository.js';
 import { registerErrorHandler } from './errors.js';
+import { registerBoundaryRoute } from './routes/boundary.js';
 import { registerContextRoute } from './routes/context.js';
 import { registerHealthRoute } from './routes/health.js';
 import { registerMetaRoute } from './routes/meta.js';
@@ -29,5 +30,6 @@ export function buildApp(config: AppConfig): FastifyInstance {
   registerMetaRoute(app, config, repository);
   registerSearchRoute(app, repository);
   registerContextRoute(app, repository);
+  registerBoundaryRoute(app, repository);
   return app;
 }

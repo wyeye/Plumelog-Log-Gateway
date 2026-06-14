@@ -1,5 +1,6 @@
 import type { Client } from '@elastic/elasticsearch';
 import type { AppConfig } from '../config/schema.js';
+import type { BoundaryRequest } from '../schema/boundary.js';
 import type { ContextRequest } from '../schema/context.js';
 import type { MetaAppsQuery } from '../schema/meta.js';
 import type { SearchRequest } from '../schema/search.js';
@@ -8,8 +9,8 @@ import { ensureContentTermTotal, normalizeContentTerms, normalizeValues } from '
 import { clampTimeRange, ensureRangeHours, resolveOptionalTimeRange } from '../utils/time.js';
 import { buildQueryHash, decodeCursor } from './cursor.js';
 import { resolveRunIndexPatterns } from './indexing.js';
-import { mapContextLog, mapContextLogs, mapSearchResponse, type GatewayWarning } from './mappers.js';
-import { buildSearchQuery } from './queryBuilders.js';
+import { mapBoundaryRecord, mapContextLog, mapContextLogs, mapSearchResponse, type GatewayWarning } from './mappers.js';
+import { buildBoundaryQuery, buildSearchQuery } from './queryBuilders.js';
 
 const SEARCH_COLUMNS = ['index', 'id', 'timestamp', 'app', 'env', 'level', 'traceId', 'host', 'logger', 'method', 'contentPreview', 'contentTruncated'];
 
@@ -31,6 +32,34 @@ export class PlumelogRepository {
 
   private validateSearchRange(from: string, to: string): void {
     ensureRangeHours(from, to, this.config.limits.maxTimeRangeHours);
+  }
+
+  private validateBoundaryRange(from: string, to: string): void {
+    ensureRangeHours(from, to, 31 * 24);
+  }
+
+  private normalizeFilters(filters: SearchRequest['filters']): SearchRequest['filters'] {
+    const contentAll = normalizeContentTerms(filters.content?.all, this.config.limits.maxContentTermLength);
+    const contentAny = normalizeContentTerms(filters.content?.any, this.config.limits.maxContentTermLength);
+    const contentNot = normalizeContentTerms(filters.content?.not, this.config.limits.maxContentTermLength);
+    ensureContentTermTotal([contentAll, contentAny, contentNot], this.config.limits.maxContentTerms);
+
+    return {
+      apps: normalizeValues(filters.apps),
+      envs: normalizeValues(filters.envs),
+      levels: normalizeValues(filters.levels),
+      traceIds: normalizeValues(filters.traceIds),
+      hosts: normalizeValues(filters.hosts),
+      loggers: normalizeValues(filters.loggers),
+      methods: normalizeValues(filters.methods),
+      content: filters.content
+        ? {
+            all: contentAll,
+            any: contentAny,
+            not: contentNot,
+          }
+        : undefined,
+    };
   }
 
   private async resolveExistingRunIndices(from: string, to: string): Promise<{ indices: string[]; warnings: GatewayWarning[] }> {
@@ -119,30 +148,9 @@ export class PlumelogRepository {
   }
 
   async searchLogs(request: SearchRequest) {
-    const contentAll = normalizeContentTerms(request.filters.content?.all, this.config.limits.maxContentTermLength);
-    const contentAny = normalizeContentTerms(request.filters.content?.any, this.config.limits.maxContentTermLength);
-    const contentNot = normalizeContentTerms(request.filters.content?.not, this.config.limits.maxContentTermLength);
-    ensureContentTermTotal([contentAll, contentAny, contentNot], this.config.limits.maxContentTerms);
-
     const normalizedRequest: SearchRequest = {
       ...request,
-      filters: {
-        ...request.filters,
-        apps: normalizeValues(request.filters.apps),
-        envs: normalizeValues(request.filters.envs),
-        levels: normalizeValues(request.filters.levels),
-        traceIds: normalizeValues(request.filters.traceIds),
-        hosts: normalizeValues(request.filters.hosts),
-        loggers: normalizeValues(request.filters.loggers),
-        methods: normalizeValues(request.filters.methods),
-        content: request.filters.content
-          ? {
-              all: contentAll,
-              any: contentAny,
-              not: contentNot,
-            }
-          : undefined,
-      },
+      filters: this.normalizeFilters(request.filters),
     };
     this.validateLimit(normalizedRequest.limit);
     this.validateSearchRange(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to);
@@ -218,6 +226,75 @@ export class PlumelogRepository {
     } catch (error) {
       throw wrapElasticsearchError(error);
     }
+  }
+
+  async findBoundary(request: BoundaryRequest) {
+    this.validateBoundaryRange(request.timeRange.from, request.timeRange.to);
+
+    const normalizedRequest: BoundaryRequest = {
+      ...request,
+      filters: this.normalizeFilters(request.filters),
+    };
+
+    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to);
+    if (indices.length === 0) {
+      return {
+        schema: 'plumelog.boundary.v1',
+        record: null,
+        warnings,
+      };
+    }
+
+    const orderedIndices = normalizedRequest.direction === 'latest'
+      ? [...indices].reverse()
+      : indices;
+
+    for (const index of orderedIndices) {
+      try {
+        const response = await this.client.search({
+          index,
+          body: buildBoundaryQuery(this.config, normalizedRequest, normalizedRequest.direction, 'time_seq'),
+        });
+        const hit = (response as any).body?.hits?.hits?.[0] ?? null;
+        if (hit) {
+          return {
+            schema: 'plumelog.boundary.v1',
+            record: mapBoundaryRecord(this.config, hit),
+            warnings,
+          };
+        }
+      } catch (error) {
+        if (!String(error).includes(this.config.plumelog.fields.seq)) {
+          throw wrapElasticsearchError(error);
+        }
+
+        const fallback = await this.client.search({
+          index,
+          body: buildBoundaryQuery(this.config, normalizedRequest, normalizedRequest.direction, 'time_only'),
+        });
+        const hit = (fallback as any).body?.hits?.hits?.[0] ?? null;
+        if (hit) {
+          return {
+            schema: 'plumelog.boundary.v1',
+            record: mapBoundaryRecord(this.config, hit),
+            warnings: [
+              ...warnings,
+              {
+                code: 'SEQ_SORT_UNAVAILABLE',
+                message: 'seq field is unavailable; falling back to dtTime-only sort',
+                details: {},
+              },
+            ],
+          };
+        }
+      }
+    }
+
+    return {
+      schema: 'plumelog.boundary.v1',
+      record: null,
+      warnings,
+    };
   }
 
   private validateCenterIndex(index: string, from: string, to: string): void {

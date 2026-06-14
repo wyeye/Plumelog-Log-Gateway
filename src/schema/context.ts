@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { isoDateTimeSchema, warningSchema } from './common.js';
 
-export const contextRequestSchema = z.object({
+export const contextRequestObjectSchema = z.object({
   timeRange: z.object({
     from: isoDateTimeSchema,
     to: isoDateTimeSchema,
@@ -15,7 +15,9 @@ export const contextRequestSchema = z.object({
   context: z.object({
     timeWindowSeconds: z.number().int().positive().max(3600).optional(),
   }).optional(),
-}).superRefine((value, ctx) => {
+});
+
+export const contextRequestSchema = contextRequestObjectSchema.superRefine((value, ctx) => {
   if (!value.center && !value.traceId) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -38,3 +40,5 @@ export const contextResponseSchema = z.object({
   }),
   warnings: z.array(warningSchema),
 });
+
+export type ContextResponse = z.infer<typeof contextResponseSchema>;

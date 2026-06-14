@@ -82,6 +82,27 @@ export function mapSearchResponse(
   };
 }
 
+export function mapBoundaryRecord(config: AppConfig, hit: any) {
+  if (!hit) {
+    return null;
+  }
+
+  const source = hit._source ?? {};
+  const preview = buildContentPreview(
+    String(source[config.plumelog.fields.message] ?? ''),
+    config.limits.contentPreviewChars,
+  );
+
+  return {
+    timestamp: safeIso(source[config.plumelog.fields.time]),
+    app: source[config.plumelog.fields.app] ?? null,
+    env: source[config.plumelog.fields.env] ?? null,
+    index: String(hit._index ?? ''),
+    id: String(hit._id ?? ''),
+    contentPreview: preview.contentPreview,
+  };
+}
+
 export function mapContextLog(config: AppConfig, hit: any) {
   const source = hit._source ?? {};
   return {
