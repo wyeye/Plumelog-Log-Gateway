@@ -1,8 +1,17 @@
 import { z } from 'zod';
 
+export const READ_SCOPES = ['meta:read', 'logs:search', 'logs:context', 'logs:boundary'] as const;
+const scopeSchema = z.enum(READ_SCOPES);
+
 const apiKeySchema = z.object({
   name: z.string().min(1),
   token: z.string().min(1),
+  scopes: z.array(scopeSchema).default([...READ_SCOPES]),
+  allowedApps: z.array(z.string().min(1)).default([]),
+  allowedEnvs: z.array(z.string().min(1)).default([]),
+  maxTimeRangeHours: z.number().positive().optional(),
+  maxLimit: z.number().int().min(1).max(500).optional(),
+  allowRawContent: z.boolean().default(false),
 });
 
 const nullableNonEmptyStringSchema = z.preprocess(
@@ -66,6 +75,11 @@ export const configSchema = z.object({
   }).default({}),
   cursor: z.object({
     signingSecret: nullableNonEmptyStringSchema.default(null),
+  }).default({}),
+  redaction: z.object({
+    enabled: z.boolean().default(true),
+    replacement: z.string().min(1).default('[REDACTED]'),
+    maxInputChars: z.number().int().positive().default(200_000),
   }).default({}),
 });
 

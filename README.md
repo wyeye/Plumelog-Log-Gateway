@@ -36,7 +36,6 @@ Elasticsearch / Plumelog indices
 - Elasticsearch DSL 透传。
 - 日志删除或索引管理。
 - 保留期管理。
-- 脱敏。
 
 ## 接口
 
@@ -81,6 +80,42 @@ elasticsearch:
 meta:
   appAggSize: 200
   envAggSize: 50
+```
+
+## 权限、脱敏与审计
+
+旧配置只需要 `name/token`，默认拥有全部只读 scope。生产环境可按 API key 收紧 scope、app/env、时间范围和 limit。
+
+默认启用日志脱敏，搜索 `contentPreview`、context `content`、boundary `contentPreview` 会遮盖 Authorization/Bearer、Cookie、password/passwd/pwd、secret、token/access_token/refresh_token、JWT、邮箱、手机号、身份证号和银行卡号。审计日志只记录计数与范围，不记录 token 或完整正文。
+
+最小配置：
+
+```yaml
+auth:
+  apiKeys:
+    - name: codex
+      token: ${PLUMELOG_GATEWAY_TOKEN}
+redaction:
+  enabled: true
+```
+
+严格配置示例：
+
+```yaml
+auth:
+  apiKeys:
+    - name: prod-reader
+      token: ${PLUMELOG_GATEWAY_TOKEN}
+      scopes: ["meta:read", "logs:search", "logs:context", "logs:boundary"]
+      allowedApps: ["order-service"]
+      allowedEnvs: ["prod"]
+      maxTimeRangeHours: 6
+      maxLimit: 100
+      allowRawContent: false
+redaction:
+  enabled: true
+  replacement: "[REDACTED]"
+  maxInputChars: 200000
 ```
 
 `/api/v1/logs/boundary` 示例：

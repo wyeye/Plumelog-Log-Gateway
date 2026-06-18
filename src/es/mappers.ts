@@ -1,4 +1,5 @@
 import type { AppConfig } from '../config/schema.js';
+import { redactText } from '../security/redact.js';
 import { buildContentPreview } from '../utils/content.js';
 import { encodeCursor, type SearchCursor } from './cursor.js';
 
@@ -6,6 +7,10 @@ export interface GatewayWarning {
   code: string;
   message: string;
   details: Record<string, unknown>;
+}
+
+export interface MapLogOptions {
+  redactContent?: boolean;
 }
 
 const SEARCH_COLUMNS = [
@@ -33,6 +38,11 @@ function safeEpoch(value: unknown): number {
   return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
+function logContent(config: AppConfig, source: Record<string, unknown>, options: MapLogOptions = {}): string {
+  const content = String(source[config.plumelog.fields.message] ?? '');
+  return options.redactContent === false ? content : redactText(content, config);
+}
+
 export function mapSearchResponse(
   config: AppConfig,
   response: any,
@@ -40,6 +50,7 @@ export function mapSearchResponse(
   queryHash: string,
   limit: number,
   warnings: GatewayWarning[] = [],
+  options: MapLogOptions = {},
 ) {
   const hits = response.hits?.hits ?? [];
   const hasMore = hits.length > limit;
@@ -47,7 +58,7 @@ export function mapSearchResponse(
   const rows = pageHits.map((hit: any) => {
     const source = hit._source ?? {};
     const preview = buildContentPreview(
-      String(source[config.plumelog.fields.message] ?? ''),
+      logContent(config, source, options),
       config.limits.contentPreviewChars,
     );
     return [
@@ -90,14 +101,14 @@ export function mapSearchResponse(
   };
 }
 
-export function mapBoundaryRecord(config: AppConfig, hit: any) {
+export function mapBoundaryRecord(config: AppConfig, hit: any, options: MapLogOptions = {}) {
   if (!hit) {
     return null;
   }
 
   const source = hit._source ?? {};
   const preview = buildContentPreview(
-    String(source[config.plumelog.fields.message] ?? ''),
+    logContent(config, source, options),
     config.limits.contentPreviewChars,
   );
 
@@ -111,7 +122,7 @@ export function mapBoundaryRecord(config: AppConfig, hit: any) {
   };
 }
 
-export function mapContextLog(config: AppConfig, hit: any) {
+export function mapContextLog(config: AppConfig, hit: any, options: MapLogOptions = {}) {
   const source = hit._source ?? {};
   return {
     source: {
@@ -128,12 +139,12 @@ export function mapContextLog(config: AppConfig, hit: any) {
     thread: source[config.plumelog.fields.thread] ?? null,
     logger: source[config.plumelog.fields.logger] ?? null,
     method: source[config.plumelog.fields.method] ?? null,
-    content: String(source[config.plumelog.fields.message] ?? ''),
+    content: logContent(config, source, options),
     truncated: false,
     sort: hit.sort ?? [],
   };
 }
 
-export function mapContextLogs(config: AppConfig, response: any) {
-  return (response.hits?.hits ?? response.body?.hits?.hits ?? []).map((hit: any) => mapContextLog(config, hit));
+export function mapContextLogs(config: AppConfig, response: any, options: MapLogOptions = {}) {
+  return (response.hits?.hits ?? response.body?.hits?.hits ?? []).map((hit: any) => mapContextLog(config, hit, options));
 }

@@ -1,4 +1,5 @@
 import type { Client } from '@elastic/elasticsearch';
+import { appEnvAllowed, type AuthPrincipal } from '../auth/authorize.js';
 import type { AppConfig } from '../config/schema.js';
 import type { BoundaryRequest } from '../schema/boundary.js';
 import type { ContextRequest } from '../schema/context.js';
@@ -116,7 +117,18 @@ export class PlumelogRepository {
     return { indices, warnings };
   }
 
-  async listApps(query: MetaAppsQuery) {
+  private principalFilters(principal?: AuthPrincipal) {
+    const filters = [];
+    if (principal?.allowedApps.length) {
+      filters.push({ terms: { [this.config.plumelog.fields.app]: principal.allowedApps } });
+    }
+    if (principal?.allowedEnvs.length) {
+      filters.push({ terms: { [this.config.plumelog.fields.env]: principal.allowedEnvs } });
+    }
+    return filters;
+  }
+
+  async listApps(query: MetaAppsQuery, principal?: AuthPrincipal) {
     const timeRange = resolveOptionalTimeRange(query.from, query.to, this.config.meta.defaultTimeRangeHours);
     this.validateSearchRange(timeRange.from, timeRange.to);
     const { indices, warnings } = await this.resolveExistingRunIndices(timeRange.from, timeRange.to);
@@ -136,11 +148,18 @@ export class PlumelogRepository {
         track_total_hits: false,
         body: {
           query: {
-            range: {
-              [this.config.plumelog.fields.time]: {
-                gte: timeRange.from,
-                lt: timeRange.to,
-              },
+            bool: {
+              filter: [
+                {
+                  range: {
+                    [this.config.plumelog.fields.time]: {
+                      gte: timeRange.from,
+                      lt: timeRange.to,
+                    },
+                  },
+                },
+                ...this.principalFilters(principal),
+              ],
             },
           },
           aggs: {
@@ -173,7 +192,9 @@ export class PlumelogRepository {
           },
         });
       }
-      const apps = (appsAgg?.buckets ?? []).map((bucket: any) => {
+      const apps = (appsAgg?.buckets ?? [])
+        .filter((bucket: any) => principal?.allowedApps.length ? principal.allowedApps.includes(String(bucket.key)) : true)
+        .map((bucket: any) => {
         const envAgg = bucket.envs;
         if (Number(envAgg?.sum_other_doc_count ?? 0) > 0) {
           resultWarnings.push({
@@ -186,9 +207,11 @@ export class PlumelogRepository {
             },
           });
         }
+        const envBuckets = (envAgg?.buckets ?? [])
+          .filter((env: any) => principal?.allowedEnvs.length ? principal.allowedEnvs.includes(String(env.key)) : true);
         return {
           app: bucket.key,
-          envs: (envAgg?.buckets ?? []).map((env: any) => env.key),
+          envs: envBuckets.map((env: any) => env.key),
         };
       });
       return {
@@ -202,7 +225,11 @@ export class PlumelogRepository {
     }
   }
 
-  async searchLogs(request: SearchRequest) {
+  private mapOptions(principal?: AuthPrincipal) {
+    return { redactContent: !(principal?.allowRawContent ?? false) };
+  }
+
+  async searchLogs(request: SearchRequest, principal?: AuthPrincipal) {
     const normalizedRequest: SearchRequest = {
       ...request,
       filters: this.normalizeFilters(request.filters),
@@ -285,13 +312,14 @@ export class PlumelogRepository {
         queryHash,
         normalizedRequest.limit,
         searchWarnings,
+        this.mapOptions(principal),
       );
     } catch (error) {
       throw wrapElasticsearchError(error);
     }
   }
 
-  async findBoundary(request: BoundaryRequest) {
+  async findBoundary(request: BoundaryRequest, principal?: AuthPrincipal) {
     this.validateBoundaryRange(request.timeRange.from, request.timeRange.to);
 
     const normalizedRequest: BoundaryRequest = {
@@ -316,7 +344,7 @@ export class PlumelogRepository {
       const hit = (response as any).body?.hits?.hits?.[0] ?? null;
       return {
         schema: 'plumelog.boundary.v1',
-        record: hit ? mapBoundaryRecord(this.config, hit) : null,
+        record: hit ? mapBoundaryRecord(this.config, hit, this.mapOptions(principal)) : null,
         warnings,
       };
     } catch (error) {
@@ -352,7 +380,7 @@ export class PlumelogRepository {
     }
   }
 
-  private async getLogsByTraceId(indices: string[], traceId: string, from: string, to: string, limit: number) {
+  private async getLogsByTraceId(indices: string[], traceId: string, from: string, to: string, limit: number, principal?: AuthPrincipal) {
     try {
       return await this.client.search({
         index: indices,
@@ -363,6 +391,7 @@ export class PlumelogRepository {
               filter: [
                 { term: { [this.config.plumelog.fields.traceId]: traceId } },
                 { range: { [this.config.plumelog.fields.time]: { gte: from, lt: to } } },
+                ...this.principalFilters(principal),
               ],
             },
           },
@@ -374,7 +403,7 @@ export class PlumelogRepository {
     }
   }
 
-  private async getNearbyLogs(indices: string[], app: string, host: string, from: string, to: string, limit: number) {
+  private async getNearbyLogs(indices: string[], app: string, host: string, from: string, to: string, limit: number, principal?: AuthPrincipal) {
     try {
       return await this.client.search({
         index: indices,
@@ -386,6 +415,7 @@ export class PlumelogRepository {
                 { term: { [this.config.plumelog.fields.app]: app } },
                 { term: { [this.config.plumelog.fields.host]: host } },
                 { range: { [this.config.plumelog.fields.time]: { gte: from, lt: to } } },
+                ...this.principalFilters(principal),
               ],
             },
           },
@@ -397,7 +427,7 @@ export class PlumelogRepository {
     }
   }
 
-  async getContext(request: ContextRequest) {
+  async getContext(request: ContextRequest, principal?: AuthPrincipal) {
     this.validateLimit(request.limit);
     this.validateSearchRange(request.timeRange.from, request.timeRange.to);
     if ((request.context?.timeWindowSeconds ?? this.config.limits.contextDefaultWindowSeconds) > this.config.limits.contextMaxWindowSeconds) {
@@ -408,6 +438,13 @@ export class PlumelogRepository {
     if (request.center) {
       this.validateCenterIndex(request.center.index, request.timeRange.from, request.timeRange.to);
       center = await this.getCenterLog(request.center.index, request.center.id);
+      if (!appEnvAllowed(
+        principal,
+        center._source?.[this.config.plumelog.fields.app],
+        center._source?.[this.config.plumelog.fields.env],
+      )) {
+        throw new AppError('FORBIDDEN', 403, {}, 'center log exceeds API key limit');
+      }
     }
 
     const traceId = request.traceId ?? center?._source?.[this.config.plumelog.fields.traceId] ?? null;
@@ -415,7 +452,7 @@ export class PlumelogRepository {
     if (indices.length === 0) {
       return {
         schema: 'plumelog.context.v1',
-        center: center ? mapContextLog(this.config, center) : null,
+        center: center ? mapContextLog(this.config, center, this.mapOptions(principal)) : null,
         traceLogs: [],
         nearbyLogs: [],
         resolution: {
@@ -427,11 +464,11 @@ export class PlumelogRepository {
     }
 
     if (traceId) {
-      const traceLogsResponse = await this.getLogsByTraceId(indices, traceId, request.timeRange.from, request.timeRange.to, request.limit);
+      const traceLogsResponse = await this.getLogsByTraceId(indices, traceId, request.timeRange.from, request.timeRange.to, request.limit, principal);
       return {
         schema: 'plumelog.context.v1',
-        center: center ? mapContextLog(this.config, center) : null,
-        traceLogs: mapContextLogs(this.config, (traceLogsResponse as any).body),
+        center: center ? mapContextLog(this.config, center, this.mapOptions(principal)) : null,
+        traceLogs: mapContextLogs(this.config, (traceLogsResponse as any).body, this.mapOptions(principal)),
         nearbyLogs: [],
         resolution: {
           mode: 'traceId',
@@ -459,13 +496,14 @@ export class PlumelogRepository {
       nearbyRange.from,
       nearbyRange.to,
       request.limit,
+      principal,
     );
 
     return {
       schema: 'plumelog.context.v1',
-      center: mapContextLog(this.config, center),
+      center: mapContextLog(this.config, center, this.mapOptions(principal)),
       traceLogs: [],
-      nearbyLogs: mapContextLogs(this.config, (nearbyLogsResponse as any).body),
+      nearbyLogs: mapContextLogs(this.config, (nearbyLogsResponse as any).body, this.mapOptions(principal)),
       resolution: {
         mode: 'timeWindow',
         reason: 'traceId missing, fell back to app + host window',
