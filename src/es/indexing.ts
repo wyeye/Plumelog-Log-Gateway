@@ -10,17 +10,21 @@ function resolveIndexPatterns(
 ): string[] {
   const start = new Date(from);
   const end = new Date(to);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end) {
+    return [];
+  }
+
   const cursor = new Date(start);
   const patterns = new Set<string>();
+  const step = mode === 'day'
+    ? () => cursor.setUTCDate(cursor.getUTCDate() + 1)
+    : () => cursor.setUTCHours(cursor.getUTCHours() + 1);
 
   while (cursor < end) {
     patterns.add(`${prefix}${formatIndexSuffix(cursor, timeZone, mode)}*`);
-    cursor.setUTCHours(cursor.getUTCHours() + 1);
+    step();
   }
-
-  if (patterns.size === 0) {
-    patterns.add(`${prefix}${formatIndexSuffix(start, timeZone, mode)}*`);
-  }
+  patterns.add(`${prefix}${formatIndexSuffix(new Date(end.getTime() - 1), timeZone, mode)}*`);
 
   return [...patterns];
 }

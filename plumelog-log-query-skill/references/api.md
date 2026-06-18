@@ -31,7 +31,14 @@
 - `timeRange.from`、`timeRange.to`、`direction` 必填。
 - `direction` 取值：`earliest | latest`。
 - boundary 独立支持最长 31 天。
+- boundary 对候选索引执行一次 `size=1` 搜索，并按方向排序返回命中。
 - 无命中返回 `200` 与 `record: null`。
+
+## Meta Apps Constraints
+
+- `meta.appAggSize` 控制 app 聚合 size，默认 `200`。
+- `meta.envAggSize` 控制每个 app 下 env 聚合 size，默认 `50`。
+- 聚合可能被截断时，响应 `warnings` 会包含 `APP_AGG_TRUNCATED` 或 `ENV_AGG_TRUNCATED`。
 
 ## Response Shapes
 

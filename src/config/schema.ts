@@ -21,6 +21,7 @@ export const configSchema = z.object({
     node: z.string().url(),
     username: z.string().min(1).optional(),
     password: z.string().min(1).optional(),
+    indexResolveConcurrency: z.number().int().min(1).max(64).default(8),
     tls: z.object({
       rejectUnauthorized: z.boolean(),
     }),
@@ -55,6 +56,8 @@ export const configSchema = z.object({
   }),
   meta: z.object({
     defaultTimeRangeHours: z.number().positive(),
+    appAggSize: z.number().int().min(1).default(200),
+    envAggSize: z.number().int().min(1).default(50),
   }),
   search: z.object({
     trackTotalHits: z.union([z.boolean(), z.number().int().nonnegative()]).default(false),

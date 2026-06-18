@@ -14,6 +14,30 @@ import { buildBoundaryQuery, buildSearchQuery } from './queryBuilders.js';
 
 const SEARCH_COLUMNS = ['index', 'id', 'timestamp', 'app', 'env', 'level', 'traceId', 'host', 'logger', 'method', 'contentPreview', 'contentTruncated'];
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  }));
+
+  return results;
+}
+
 export class PlumelogRepository {
   constructor(
     private readonly client: Client,
@@ -67,21 +91,25 @@ export class PlumelogRepository {
     const indices: string[] = [];
     const warnings: GatewayWarning[] = [];
 
-    for (const pattern of patterns) {
+    const resolved = await mapWithConcurrency(patterns, this.config.elasticsearch.indexResolveConcurrency, async (pattern) => {
       try {
         const exists = await this.client.indices.exists({ index: pattern });
         const body = typeof exists === 'boolean' ? exists : Boolean((exists as any).body);
-        if (body) {
-          indices.push(pattern);
-        } else {
-          warnings.push({
-            code: 'INDEX_NOT_FOUND',
-            message: 'index pattern does not exist',
-            details: { indexPattern: pattern },
-          });
-        }
+        return { pattern, exists: body };
       } catch (error) {
         throw wrapElasticsearchError(error);
+      }
+    });
+
+    for (const result of resolved) {
+      if (result.exists) {
+        indices.push(result.pattern);
+      } else {
+        warnings.push({
+          code: 'INDEX_NOT_FOUND',
+          message: 'index pattern does not exist',
+          details: { indexPattern: result.pattern },
+        });
       }
     }
 
@@ -119,13 +147,13 @@ export class PlumelogRepository {
             apps: {
               terms: {
                 field: this.config.plumelog.fields.app,
-                size: 200,
+                size: this.config.meta.appAggSize,
               },
               aggs: {
                 envs: {
                   terms: {
                     field: this.config.plumelog.fields.env,
-                    size: 50,
+                    size: this.config.meta.envAggSize,
                   },
                 },
               },
@@ -133,14 +161,41 @@ export class PlumelogRepository {
           },
         },
       });
+      const appsAgg = (response as any).body.aggregations?.apps;
+      const resultWarnings = [...warnings];
+      if (Number(appsAgg?.sum_other_doc_count ?? 0) > 0) {
+        resultWarnings.push({
+          code: 'APP_AGG_TRUNCATED',
+          message: 'app aggregation may be truncated',
+          details: {
+            size: this.config.meta.appAggSize,
+            sumOtherDocCount: Number(appsAgg.sum_other_doc_count),
+          },
+        });
+      }
+      const apps = (appsAgg?.buckets ?? []).map((bucket: any) => {
+        const envAgg = bucket.envs;
+        if (Number(envAgg?.sum_other_doc_count ?? 0) > 0) {
+          resultWarnings.push({
+            code: 'ENV_AGG_TRUNCATED',
+            message: 'env aggregation may be truncated for app',
+            details: {
+              app: String(bucket.key),
+              size: this.config.meta.envAggSize,
+              sumOtherDocCount: Number(envAgg.sum_other_doc_count),
+            },
+          });
+        }
+        return {
+          app: bucket.key,
+          envs: (envAgg?.buckets ?? []).map((env: any) => env.key),
+        };
+      });
       return {
         schema: 'plumelog.apps.v1',
         timeRange,
-        apps: ((response as any).body.aggregations?.apps?.buckets ?? []).map((bucket: any) => ({
-          app: bucket.key,
-          envs: (bucket.envs?.buckets ?? []).map((env: any) => env.key),
-        })),
-        warnings,
+        apps,
+        warnings: resultWarnings,
       };
     } catch (error) {
       throw wrapElasticsearchError(error);
@@ -253,34 +308,20 @@ export class PlumelogRepository {
       };
     }
 
-    const orderedIndices = normalizedRequest.direction === 'latest'
-      ? [...indices].reverse()
-      : indices;
-
-    for (const index of orderedIndices) {
-      try {
-        const response = await this.client.search({
-          index,
-          body: buildBoundaryQuery(this.config, normalizedRequest, normalizedRequest.direction, 'time_seq'),
-        });
-        const hit = (response as any).body?.hits?.hits?.[0] ?? null;
-        if (hit) {
-          return {
-            schema: 'plumelog.boundary.v1',
-            record: mapBoundaryRecord(this.config, hit),
-            warnings,
-          };
-        }
-      } catch (error) {
-        throw wrapElasticsearchError(error);
-      }
+    try {
+      const response = await this.client.search({
+        index: indices,
+        body: buildBoundaryQuery(this.config, normalizedRequest, normalizedRequest.direction, 'time_seq'),
+      });
+      const hit = (response as any).body?.hits?.hits?.[0] ?? null;
+      return {
+        schema: 'plumelog.boundary.v1',
+        record: hit ? mapBoundaryRecord(this.config, hit) : null,
+        warnings,
+      };
+    } catch (error) {
+      throw wrapElasticsearchError(error);
     }
-
-    return {
-      schema: 'plumelog.boundary.v1',
-      record: null,
-      warnings,
-    };
   }
 
   private validateCenterIndex(index: string, from: string, to: string): void {

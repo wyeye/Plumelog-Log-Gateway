@@ -66,6 +66,23 @@ cursor:
   signingSecret: ${PLUMELOG_CURSOR_SECRET}
 ```
 
+## 索引解析与聚合
+
+- `plumelog.indexMode=day` 时按天生成索引 pattern，`hour` 时按小时生成，避免 day 模式跨多天时小时级循环。
+- 索引存在性检查保留 `INDEX_NOT_FOUND` warning，但按 `elasticsearch.indexResolveConcurrency` 并发执行，默认 `8`。
+- boundary 查询会对候选索引执行一次 `size=1` 搜索，由 ES 排序返回最早或最晚命中。
+- `meta.appAggSize` 默认 `200`，`meta.envAggSize` 默认 `50`。聚合被 ES 截断时会返回 `APP_AGG_TRUNCATED` 或 `ENV_AGG_TRUNCATED` warning。
+
+可选配置示例：
+
+```yaml
+elasticsearch:
+  indexResolveConcurrency: 8
+meta:
+  appAggSize: 200
+  envAggSize: 50
+```
+
 `/api/v1/logs/boundary` 示例：
 
 ```json
