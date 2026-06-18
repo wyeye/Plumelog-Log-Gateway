@@ -13,7 +13,7 @@ Use the Plumelog log gateway HTTP API or MCP tools to search logs without writin
 5. 其它场景按 `app`、`level`、`content`、`timeRange` 做首次检索。
 6. 普通排查先调用 `search_logs` / `/api/v1/logs/search`，再按需调用 `get_log_context` / `/api/v1/logs/context`。
 7. 需要上下文时，优先使用搜索结果里的 `index + id`。
-8. `summary.hasMore=true` 时使用 `summary.nextCursor` 继续翻页；不要自行构造或修改 cursor。
+8. `summary.hasMore=true` 时使用 `summary.nextCursor` 继续翻页；不要自行构造、修改或复用到其它查询。cursor 可能过期，过期后重新发起第一页查询。
 9. MCP tool 返回 `isError=true` 时，正文是结构化 JSON，优先读取 `code`、`message`、`status`、`requestId` 并把 `requestId` 带给用户或后续排查。
 10. 输出只保留查询条件、关键证据、初步判断和下一次查询建议。
 

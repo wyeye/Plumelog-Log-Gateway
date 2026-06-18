@@ -93,9 +93,11 @@ meta:
   defaultTimeRangeHours: 24
 ```
 
-生产建议配置显式开启严格只读权限、游标签名、脱敏、source filtering、ready 超时和慢查询阈值；`allowRawContent` 默认 `false`，只有确需返回未脱敏完整正文的专用 key 才建议单独设为 `true`。
+生产建议配置显式开启严格只读权限、游标签名、稳定分页 tie-breaker、脱敏、source filtering、ready 超时和慢查询阈值；`allowRawContent` 默认 `false`，只有确需返回未脱敏完整正文的专用 key 才建议单独设为 `true`。`NODE_ENV=production` 或 `runtime.production=true` 时，必须显式配置 `cursor.signingSecret` 和 `search.tieBreakerField`。
 
 ```yaml
+runtime:
+  production: true
 auth:
   apiKeys:
     - name: prod-reader
@@ -111,9 +113,12 @@ elasticsearch:
 search:
   trackTotalHits: false
   sourceFiltering: true
-  tieBreakerField: null
+  tieBreakerField: seq
+  tieBreakerType: long
 cursor:
   signingSecret: ${PLUMELOG_CURSOR_SECRET}
+  ttlSeconds: 3600
+  allowUnsignedV1: false
 redaction:
   enabled: true
   replacement: "[REDACTED]"
@@ -146,10 +151,13 @@ observability:
 
 搜索接口默认面向大日志量场景优化：
 
-- `search.trackTotalHits` 默认 `false`，ES 不做精确总数统计。响应仍保留 `summary.total` 和 `summary.totalRelation`，并新增 `summary.totalKnown`；当 `totalKnown=false` 时，不应把 `total` 当作精确总数展示。
-- 服务端会向 ES 请求 `limit + 1` 条日志，用多出来的一条判断 `summary.hasMore`。返回给调用方的 `rows` 仍最多为 `limit` 条；`hasMore=true` 表示可继续请求下一页且 `summary.nextCursor` 非空，最后一页 `hasMore=false` 且 `nextCursor=null`。
+- `search.trackTotalHits` 默认 `false`，ES 不做精确总数统计。响应保留 `summary.total`、`summary.totalRelation` 和 `summary.totalKnown`；当 `totalKnown=false` 时，`total` 为 `null`。
+- `search.trackTotalHits=false` 时，`summary.total=null`、`summary.totalKnown=false`，调用方应使用 `summary.returnedCount`、`summary.hasMore` 和 `summary.nextCursor` 展示分页状态。开启精确统计或阈值统计时，`total` 才表示 ES 返回的统计值。
+- 服务端会向 ES 请求 `limit + 1` 条日志，用多出来的一条判断 `summary.hasMore`。返回给调用方的 `rows` 仍最多为 `limit` 条，`summary.returnedCount` 等于本页返回行数；`hasMore=true` 表示可继续请求下一页且 `summary.nextCursor` 非空，最后一页 `hasMore=false` 且 `nextCursor=null`。
 - `search.sourceFiltering` 默认 `true`，搜索只拉取映射所需字段：时间、应用、环境、级别、traceId、主机、logger、method、thread 和日志正文，用于生成 `contentPreview`。
-- 新 cursor 使用 HMAC-SHA256 签名，篡改后会返回 `CURSOR_INVALID`。`cursor.signingSecret` 可显式配置；未配置时会从第一个 API key token 派生签名密钥，密钥不会输出到日志。
+- 默认排序保留 `time desc` 和 `seq desc`。生产环境必须配置 `search.tieBreakerField`，指向一个唯一、稳定、可排序且有 doc_values 的字段，并用 `search.tieBreakerType` 指明类型：`keyword`、`long` 或 `date`。不要把 `_id` 当作 tie-breaker，除非确认目标 ES 版本和 mapping 支持可靠排序。
+- 新 cursor 使用 HMAC-SHA256 签名并包含 `expiresAt`，默认 TTL 为 `cursor.ttlSeconds=3600` 秒；过期、篡改或跨查询复用都会返回 `CURSOR_INVALID`。`cursor.signingSecret` 可显式配置；非生产环境未配置时会从第一个 API key token 派生签名密钥，密钥不会输出到日志。
+- 未签名 V1 cursor 默认禁用。仅迁移期可显式设置 `cursor.allowUnsignedV1=true` 临时接受旧 cursor；生产建议保持 `false`。
 
 可选配置示例：
 
@@ -158,8 +166,11 @@ search:
   trackTotalHits: false
   sourceFiltering: true
   tieBreakerField: null
+  tieBreakerType: keyword
 cursor:
   signingSecret: ${PLUMELOG_CURSOR_SECRET}
+  ttlSeconds: 3600
+  allowUnsignedV1: false
 ```
 
 ## 索引解析与聚合

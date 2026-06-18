@@ -1,6 +1,6 @@
 import type { AppConfig } from '../config/schema.js';
 import type { SearchRequest } from '../schema/search.js';
-import type { SearchCursor } from './cursor.js';
+import type { CursorTieBreakerType, SearchCursor } from './cursor.js';
 
 type Clause = Record<string, unknown>;
 type SortOrder = 'asc' | 'desc';
@@ -58,11 +58,15 @@ function buildSourceFilter(config: AppConfig): Record<string, string[]> | undefi
   };
 }
 
-function buildSortField(field: string, order: SortOrder): Clause {
+function unmappedTypeForTieBreaker(type: CursorTieBreakerType): 'keyword' | 'long' | 'date' {
+  return type;
+}
+
+function buildSortField(field: string, order: SortOrder, tieBreakerType: CursorTieBreakerType): Clause {
   return {
     [field]: {
       order,
-      unmapped_type: 'keyword',
+      unmapped_type: unmappedTypeForTieBreaker(tieBreakerType),
       missing: order === 'desc' ? '_last' : '_first',
     },
   };
@@ -98,7 +102,7 @@ export function buildLogSort(
   if (sortMode !== 'time_only') {
     sort.push(buildSeqSortField(config.plumelog.fields.seq, order));
     if (config.search.tieBreakerField) {
-      sort.push(buildSortField(config.search.tieBreakerField, order));
+      sort.push(buildSortField(config.search.tieBreakerField, order, config.search.tieBreakerType));
     }
   }
 

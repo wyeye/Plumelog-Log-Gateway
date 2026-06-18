@@ -14,9 +14,10 @@ export type SearchRequest = z.infer<typeof searchRequestSchema>;
 export const searchResponseSchema = z.object({
   schema: z.literal('plumelog.search.v1'),
   summary: z.object({
-    total: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative().nullable(),
     totalRelation: z.enum(['eq', 'gte']),
     totalKnown: z.boolean(),
+    returnedCount: z.number().int().nonnegative(),
     hasMore: z.boolean(),
     nextCursor: z.string().nullable(),
   }),

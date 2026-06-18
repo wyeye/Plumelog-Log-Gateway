@@ -78,11 +78,14 @@ export function mapSearchResponse(
   });
   const lastSort = hasMore && pageHits.length > 0 ? pageHits[pageHits.length - 1].sort : null;
   const total = response.hits?.total;
-  const totalValue = typeof total === 'number' ? total : total?.value ?? 0;
+  const totalValue = config.search.trackTotalHits === false
+    ? null
+    : typeof total === 'number' ? total : total?.value ?? 0;
   const totalRelation = config.search.trackTotalHits === false
     ? 'gte'
     : typeof total === 'number' ? 'eq' : total?.relation ?? 'eq';
   const totalKnown = config.search.trackTotalHits !== false && totalRelation === 'eq';
+  const returnedCount = rows.length;
 
   return {
     schema: 'plumelog.search.v1',
@@ -90,9 +93,15 @@ export function mapSearchResponse(
       total: totalValue,
       totalRelation,
       totalKnown,
+      returnedCount,
       hasMore,
       nextCursor: lastSort
-        ? encodeCursor(config, { sortMode, values: lastSort, queryHash })
+        ? encodeCursor(config, {
+            sortMode,
+            tieBreakerType: config.search.tieBreakerField ? config.search.tieBreakerType : undefined,
+            values: lastSort,
+            queryHash,
+          })
         : null,
     },
     columns: [...SEARCH_COLUMNS],

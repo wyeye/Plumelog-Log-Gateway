@@ -34,10 +34,13 @@ API key 可配置 scope、allowedApps、allowedEnvs、maxTimeRangeHours 和 maxL
 - 同字段数组内部按 OR，不同字段之间按 AND。
 - `content.all` 表示全部命中，`content.any` 表示任一命中，`content.not` 表示排除命中。
 - 服务端用 `limit + 1` 条 ES 结果判断是否有下一页；响应 `rows` 仍最多返回 `limit` 条。
-- 默认 `search.trackTotalHits=false`，响应 `summary.totalKnown=false` 时，`summary.total` 不是精确总数。
+- 默认 `search.trackTotalHits=false`，响应 `summary.totalKnown=false` 时，`summary.total=null`，不要展示成精确总数。
+- `summary.returnedCount` 是本页实际返回行数；分页状态以 `hasMore` 和 `nextCursor` 为准。
 - 搜索默认启用 `_source.includes`，只拉取生成响应所需字段。
-- `summary.nextCursor` 使用签名 cursor；篡改或跨查询复用会返回 `CURSOR_INVALID`。
-- cursor 绑定 timeRange、filters、limit 和排序配置；不要跨查询复用或手工修改。
+- `summary.nextCursor` 使用带 TTL 的签名 cursor；篡改、过期或跨查询复用会返回 `CURSOR_INVALID`。
+- cursor 绑定 timeRange、filters、limit、sortMode、tieBreakerField 和 tieBreakerType；不要跨查询复用或手工修改。
+- 未签名 V1 cursor 默认禁用；只有服务端显式 `cursor.allowUnsignedV1=true` 时才会临时接受。
+- 生产环境要求显式 `cursor.signingSecret` 和唯一稳定的 `search.tieBreakerField`；`search.tieBreakerType` 取值为 `keyword | long | date`。
 
 ## Boundary Constraints
 
@@ -58,7 +61,7 @@ API key 可配置 scope、allowedApps、allowedEnvs、maxTimeRangeHours 和 maxL
 ## Response Shapes
 
 - 搜索结果返回 `columns` + `rows`。
-- 搜索摘要包含 `total`、`totalRelation`、`totalKnown`、`hasMore`、`nextCursor`。
+- 搜索摘要包含 `total`、`totalRelation`、`totalKnown`、`returnedCount`、`hasMore`、`nextCursor`。
 - `hasMore=true` 表示可用 `nextCursor` 继续翻页；最后一页 `hasMore=false` 且 `nextCursor=null`。
 - 上下文结果返回 `center`、`traceLogs`、`nearbyLogs`、`resolution`。
 - 边界结果返回 `record` 对象或 `null`。

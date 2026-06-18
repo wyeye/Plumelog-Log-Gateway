@@ -2,20 +2,23 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { AppConfig } from '../config/schema.js';
 
 type CursorValue = string | number | boolean | null;
+export type CursorSortMode = 'time_seq' | 'time_only';
+export type CursorTieBreakerType = 'keyword' | 'long' | 'date';
 
 export interface SearchCursorV1 {
   version: 1;
-  sortMode: 'time_seq' | 'time_only';
+  sortMode: CursorSortMode;
   values: CursorValue[];
   queryHash: string;
 }
 
 export interface SearchCursorV2 {
   version: 2;
-  sortMode: 'time_seq' | 'time_only';
+  sortMode: CursorSortMode;
+  tieBreakerType?: CursorTieBreakerType;
   values: CursorValue[];
   queryHash: string;
-  expiresAt?: string;
+  expiresAt: string;
 }
 
 export type SearchCursor = SearchCursorV1 | SearchCursorV2;
@@ -51,8 +54,13 @@ function parseCursorPayload(value: unknown): SearchCursor {
     throw new Error('invalid cursor');
   }
 
-  if (parsed.version === 2 && parsed.expiresAt !== undefined && typeof parsed.expiresAt !== 'string') {
-    throw new Error('invalid cursor');
+  if (parsed.version === 2) {
+    if (typeof parsed.expiresAt !== 'string' || Number.isNaN(Date.parse(parsed.expiresAt))) {
+      throw new Error('invalid cursor');
+    }
+    if (parsed.tieBreakerType !== undefined && parsed.tieBreakerType !== 'keyword' && parsed.tieBreakerType !== 'long' && parsed.tieBreakerType !== 'date') {
+      throw new Error('invalid cursor');
+    }
   }
 
   return parsed as SearchCursor;
@@ -68,8 +76,12 @@ function signaturesMatch(actual: string, expected: string): boolean {
   return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
-export function encodeCursor(config: AppConfig, cursor: Omit<SearchCursorV2, 'version'> & { version?: 2 }): string {
-  const payloadJson = JSON.stringify({ ...cursor, version: 2 });
+export function encodeCursor(
+  config: AppConfig,
+  cursor: Omit<SearchCursorV2, 'version' | 'expiresAt'> & { version?: 2; expiresAt?: string },
+): string {
+  const expiresAt = cursor.expiresAt ?? new Date(Date.now() + config.cursor.ttlSeconds * 1000).toISOString();
+  const payloadJson = JSON.stringify({ ...cursor, expiresAt, version: 2 });
   const payload = Buffer.from(payloadJson, 'utf8').toString('base64url');
   return `${payload}.${signPayloadJson(payloadJson, config)}`;
 }
@@ -82,6 +94,9 @@ export function decodeCursor(config: AppConfig, raw: string): DecodedCursor {
     }
 
     if (!signature) {
+      if (!config.cursor.allowUnsignedV1) {
+        throw new Error('invalid cursor');
+      }
       const legacy = parseCursorPayload(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')));
       if (legacy.version !== 1) {
         throw new Error('invalid cursor');

@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const READ_SCOPES = ['meta:read', 'logs:search', 'logs:context', 'logs:boundary'] as const;
 const scopeSchema = z.enum(READ_SCOPES);
+const tieBreakerTypeSchema = z.enum(['keyword', 'long', 'date']);
 
 const apiKeySchema = z.object({
   name: z.string().min(1),
@@ -20,6 +21,9 @@ const nullableNonEmptyStringSchema = z.preprocess(
 );
 
 export const configSchema = z.object({
+  runtime: z.object({
+    production: z.boolean().default(false),
+  }).default({}),
   server: z.object({
     port: z.number().int().min(1).max(65535),
   }),
@@ -72,9 +76,12 @@ export const configSchema = z.object({
     trackTotalHits: z.union([z.boolean(), z.number().int().nonnegative()]).default(false),
     sourceFiltering: z.boolean().default(true),
     tieBreakerField: nullableNonEmptyStringSchema.default(null),
+    tieBreakerType: tieBreakerTypeSchema.default('keyword'),
   }).default({}),
   cursor: z.object({
     signingSecret: nullableNonEmptyStringSchema.default(null),
+    ttlSeconds: z.number().int().positive().default(3600),
+    allowUnsignedV1: z.boolean().default(false),
   }).default({}),
   redaction: z.object({
     enabled: z.boolean().default(true),

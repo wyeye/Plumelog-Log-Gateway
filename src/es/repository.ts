@@ -317,17 +317,18 @@ export class PlumelogRepository {
       } catch {
         throw new AppError('CURSOR_INVALID', 400, {}, 'cursor is invalid');
       }
-      if (legacyUnsignedCursor && this.config.search.tieBreakerField) {
-        throw new AppError('CURSOR_INVALID', 400, {}, 'legacy cursor cannot be used after tie-breaker sort changes');
-      }
     }
     const effectiveSortMode = cursor?.sortMode ?? 'time_seq';
+    if (!legacyUnsignedCursor && cursor?.version === 2 && cursor.tieBreakerType !== undefined && cursor.tieBreakerType !== this.config.search.tieBreakerType) {
+      throw new AppError('CURSOR_INVALID', 400, {}, 'cursor tie-breaker type does not match current query');
+    }
     const queryHash = buildQueryHash({
       timeRange: normalizedRequest.timeRange,
       filters: normalizedRequest.filters,
       limit: normalizedRequest.limit,
       sortMode: effectiveSortMode,
       tieBreakerField: effectiveSortMode === 'time_seq' ? this.config.search.tieBreakerField : null,
+      tieBreakerType: effectiveSortMode === 'time_seq' && this.config.search.tieBreakerField ? this.config.search.tieBreakerType : null,
     });
     if (cursor) {
       const expectedQueryHash = legacyUnsignedCursor ? legacyQueryHash : queryHash;
@@ -351,9 +352,10 @@ export class PlumelogRepository {
       return {
         schema: 'plumelog.search.v1',
         summary: {
-          total: 0,
-          totalRelation: 'eq',
-          totalKnown: true,
+          total: this.config.search.trackTotalHits === false ? null : 0,
+          totalRelation: this.config.search.trackTotalHits === false ? 'gte' : 'eq',
+          totalKnown: this.config.search.trackTotalHits !== false,
+          returnedCount: 0,
           hasMore: false,
           nextCursor: null,
         },
