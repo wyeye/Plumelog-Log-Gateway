@@ -47,6 +47,85 @@ Elasticsearch / Plumelog indices
 - `POST /api/v1/logs/context`
 - `POST /api/v1/logs/boundary`
 
+## 配置示例
+
+最小可启动配置需要包含服务端口、API key、Elasticsearch 地址、Plumelog 索引/字段映射、查询限制和 meta 默认时间范围。未列出的 `search`、`cursor`、`redaction`、`observability`、`meta.appAggSize`、`meta.envAggSize`、`elasticsearch.indexResolveConcurrency` 都有默认值。
+
+```yaml
+server:
+  port: 8787
+auth:
+  apiKeys:
+    - name: codex
+      token: ${PLUMELOG_GATEWAY_TOKEN}
+elasticsearch:
+  node: http://127.0.0.1:9200
+  username: ${ES_USERNAME}
+  password: ${ES_PASSWORD}
+  tls:
+    rejectUnauthorized: true
+plumelog:
+  indexMode: day
+  timezone: Asia/Shanghai
+  runIndexPrefix: plume_log_run_
+  traceIndexPrefix: plume_log_trace_
+  fields:
+    time: dtTime
+    app: appName
+    env: env
+    level: logLevel
+    message: content
+    host: serverName
+    traceId: traceId
+    logger: className
+    method: method
+    thread: threadName
+    seq: seq
+limits:
+  maxTimeRangeHours: 24
+  maxLimit: 500
+  contentPreviewChars: 500
+  maxContentTermLength: 200
+  maxContentTerms: 20
+  contextDefaultWindowSeconds: 300
+  contextMaxWindowSeconds: 3600
+meta:
+  defaultTimeRangeHours: 24
+```
+
+生产建议配置显式开启严格只读权限、游标签名、脱敏、source filtering、ready 超时和慢查询阈值；`allowRawContent` 默认 `false`，只有确需返回未脱敏完整正文的专用 key 才建议单独设为 `true`。
+
+```yaml
+auth:
+  apiKeys:
+    - name: prod-reader
+      token: ${PLUMELOG_GATEWAY_TOKEN}
+      scopes: ["meta:read", "logs:search", "logs:context", "logs:boundary"]
+      allowedApps: ["order-service"]
+      allowedEnvs: ["prod"]
+      maxTimeRangeHours: 6
+      maxLimit: 100
+      allowRawContent: false
+elasticsearch:
+  indexResolveConcurrency: 8
+search:
+  trackTotalHits: false
+  sourceFiltering: true
+  tieBreakerField: null
+cursor:
+  signingSecret: ${PLUMELOG_CURSOR_SECRET}
+redaction:
+  enabled: true
+  replacement: "[REDACTED]"
+  maxInputChars: 200000
+meta:
+  appAggSize: 200
+  envAggSize: 50
+observability:
+  slowQueryMs: 1000
+  readyTimeoutMs: 1000
+```
+
 ## 健康检查与可观测性
 
 - `GET /health` 保持兼容，返回 `{ "status": "ok" }`。
@@ -68,7 +147,7 @@ observability:
 搜索接口默认面向大日志量场景优化：
 
 - `search.trackTotalHits` 默认 `false`，ES 不做精确总数统计。响应仍保留 `summary.total` 和 `summary.totalRelation`，并新增 `summary.totalKnown`；当 `totalKnown=false` 时，不应把 `total` 当作精确总数展示。
-- 服务端会向 ES 请求 `limit + 1` 条日志，用多出来的一条判断 `summary.hasMore`。返回给调用方的 `rows` 仍最多为 `limit` 条；只有存在下一页时才返回 `summary.nextCursor`。
+- 服务端会向 ES 请求 `limit + 1` 条日志，用多出来的一条判断 `summary.hasMore`。返回给调用方的 `rows` 仍最多为 `limit` 条；`hasMore=true` 表示可继续请求下一页且 `summary.nextCursor` 非空，最后一页 `hasMore=false` 且 `nextCursor=null`。
 - `search.sourceFiltering` 默认 `true`，搜索只拉取映射所需字段：时间、应用、环境、级别、traceId、主机、logger、method、thread 和日志正文，用于生成 `contentPreview`。
 - 新 cursor 使用 HMAC-SHA256 签名，篡改后会返回 `CURSOR_INVALID`。`cursor.signingSecret` 可显式配置；未配置时会从第一个 API key token 派生签名密钥，密钥不会输出到日志。
 
@@ -102,39 +181,10 @@ meta:
 
 ## 权限、脱敏与审计
 
-旧配置只需要 `name/token`，默认拥有全部只读 scope。生产环境可按 API key 收紧 scope、app/env、时间范围和 limit。
+旧配置只需要 `name/token`，默认拥有全部只读 scope：`meta:read`、`logs:search`、`logs:context`、`logs:boundary`。生产环境可按 API key 收紧 scope、app/env、时间范围和 limit。
 
 默认启用日志脱敏，搜索 `contentPreview`、context `content`、boundary `contentPreview` 会遮盖 Authorization/Bearer、Cookie、password/passwd/pwd、secret、token/access_token/refresh_token、JWT、邮箱、手机号、身份证号和银行卡号。审计日志只记录计数与范围，不记录 token 或完整正文。
-
-最小配置：
-
-```yaml
-auth:
-  apiKeys:
-    - name: codex
-      token: ${PLUMELOG_GATEWAY_TOKEN}
-redaction:
-  enabled: true
-```
-
-严格配置示例：
-
-```yaml
-auth:
-  apiKeys:
-    - name: prod-reader
-      token: ${PLUMELOG_GATEWAY_TOKEN}
-      scopes: ["meta:read", "logs:search", "logs:context", "logs:boundary"]
-      allowedApps: ["order-service"]
-      allowedEnvs: ["prod"]
-      maxTimeRangeHours: 6
-      maxLimit: 100
-      allowRawContent: false
-redaction:
-  enabled: true
-  replacement: "[REDACTED]"
-  maxInputChars: 200000
-```
+若 API key 的 `allowRawContent=true`，context 等完整正文映射允许绕过脱敏；该选项应只给受控排障 key 使用，默认不要开启。
 
 `/api/v1/logs/boundary` 示例：
 
@@ -198,6 +248,8 @@ ghcr.io/wyeye/plumelog-log-gateway
 ```bash
 rtk docker build -t plumelog-log-gateway:local .
 ```
+
+镜像内置 Docker `HEALTHCHECK`，使用 Node.js 请求 `GET /health`，不依赖 curl/wget。运行时仍保持 `USER node`，final image 不包含项目 `.npmrc`。
 
 使用镜像内默认 `config.yaml` 运行：
 

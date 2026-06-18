@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "check": "npm run build",
     "dev": "tsx src/index.ts",
     "start": "node dist/src/index.js",
     "mcp": "tsx src/mcp/index.ts",

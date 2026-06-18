@@ -12,10 +12,19 @@ API key 可配置 scope、allowedApps、allowedEnvs、maxTimeRangeHours 和 maxL
 ## Endpoints
 
 - `GET /health`
+- `GET /live`
+- `GET /ready`
 - `GET /api/v1/meta/apps`
 - `POST /api/v1/logs/search`
 - `POST /api/v1/logs/context`
 - `POST /api/v1/logs/boundary`
+
+## Health and Request IDs
+
+- `/health` 保持兼容，返回 `{ "status": "ok" }`。
+- `/live` 只检查进程存活。
+- `/ready` 检查 Elasticsearch 可访问性；不可达时返回 `503`，响应包含 `status`、`checks`、`durationMs`、`requestId`。
+- 调用方可传 `x-request-id`；响应 header、错误响应和审计日志会使用该 ID。未传时网关生成短随机 ID。
 
 ## Search Constraints
 
@@ -28,6 +37,7 @@ API key 可配置 scope、allowedApps、allowedEnvs、maxTimeRangeHours 和 maxL
 - 默认 `search.trackTotalHits=false`，响应 `summary.totalKnown=false` 时，`summary.total` 不是精确总数。
 - 搜索默认启用 `_source.includes`，只拉取生成响应所需字段。
 - `summary.nextCursor` 使用签名 cursor；篡改或跨查询复用会返回 `CURSOR_INVALID`。
+- cursor 绑定 timeRange、filters、limit 和排序配置；不要跨查询复用或手工修改。
 
 ## Boundary Constraints
 
@@ -53,5 +63,25 @@ API key 可配置 scope、allowedApps、allowedEnvs、maxTimeRangeHours 和 maxL
 - 上下文结果返回 `center`、`traceLogs`、`nearbyLogs`、`resolution`。
 - 边界结果返回 `record` 对象或 `null`。
 - 错误统一返回 `error.code`、`error.message`、`error.details`。
+- HTTP 错误响应还包含顶层 `requestId` 和 `error.requestId`。
 - 无 token/错误 token 返回 `401 UNAUTHORIZED`；scope 或 API key policy 不允许返回 `403 FORBIDDEN`。
 - 默认启用脱敏；搜索 preview、context content、boundary preview 中的 token、Cookie、密码、JWT、邮箱、手机号、身份证号、银行卡号会被替换为 `[REDACTED:<type>]`。
+- `allowRawContent=false` 是默认值；只有 API key 显式设置 `allowRawContent=true` 时，完整正文映射才允许绕过脱敏。
+
+## MCP Error Shape
+
+MCP tool 调用失败时返回 `isError=true`，文本内容是结构化 JSON：
+
+```json
+{
+  "code": "GATEWAY_TIMEOUT",
+  "message": "gateway request timed out",
+  "status": 0,
+  "requestId": "abc123def4567890",
+  "details": {}
+}
+```
+
+- `status=0` 表示客户端侧网络错误或超时，没有 HTTP 状态码。
+- 非 JSON 网关响应会返回 `GATEWAY_NON_JSON_RESPONSE`，`details.bodyPreview` 最多包含前 500 字符。
+- MCP 客户端默认超时 `10000` ms，可通过 `PLUMELOG_GATEWAY_TIMEOUT_MS` 设置；网络错误和 HTTP `502/503/504` 最多尝试 3 次。
