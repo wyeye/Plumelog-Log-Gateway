@@ -11,6 +11,6 @@ export function registerMetaRoute(app: FastifyInstance, _config: AppConfig, repo
     enforceScope(principal, 'meta:read');
     const query = metaAppsQuerySchema.parse(request.query);
     enforceTimeRangePolicy(principal, resolveOptionalTimeRange(query.from, query.to, _config.meta.defaultTimeRangeHours));
-    return repository.listApps(query, principal);
+    return repository.listApps(query, principal, { requestId: request.id });
   });
 }

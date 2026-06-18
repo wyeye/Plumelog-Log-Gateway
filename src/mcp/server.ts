@@ -9,7 +9,7 @@ import { metaAppsQuerySchema } from '../schema/meta.js';
 import type { SearchRequest } from '../schema/search.js';
 import { searchRequestSchema } from '../schema/search.js';
 import { loadMcpConfig } from './config.js';
-import { GatewayClient } from './gatewayClient.js';
+import { GatewayClient, GatewayClientError } from './gatewayClient.js';
 
 function toolTextResult(payload: unknown) {
   return {
@@ -22,13 +22,13 @@ function toolTextResult(payload: unknown) {
   };
 }
 
-function toolErrorResult(message: string) {
+function toolErrorResult(payload: unknown) {
   return {
     isError: true,
     content: [
       {
         type: 'text' as const,
-        text: message,
+        text: JSON.stringify(payload, null, 2),
       },
     ],
   };
@@ -38,7 +38,15 @@ async function callTool<T>(action: () => Promise<T>) {
   try {
     return toolTextResult(await action());
   } catch (error) {
-    return toolErrorResult(error instanceof Error ? error.message : 'unknown gateway error');
+    if (error instanceof GatewayClientError) {
+      return toolErrorResult(error.payload);
+    }
+    return toolErrorResult({
+      code: 'MCP_TOOL_ERROR',
+      message: error instanceof Error ? error.message : 'unknown gateway error',
+      status: 0,
+      requestId: 'unknown',
+    });
   }
 }
 

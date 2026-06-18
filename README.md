@@ -40,10 +40,28 @@ Elasticsearch / Plumelog indices
 ## 接口
 
 - `GET /health`
+- `GET /live`
+- `GET /ready`
 - `GET /api/v1/meta/apps`
 - `POST /api/v1/logs/search`
 - `POST /api/v1/logs/context`
 - `POST /api/v1/logs/boundary`
+
+## 健康检查与可观测性
+
+- `GET /health` 保持兼容，返回 `{ "status": "ok" }`。
+- `GET /live` 只检查进程存活，不访问 Elasticsearch。
+- `GET /ready` 使用短超时检查 Elasticsearch 可访问性；不可达时返回 `503`，响应包含 `status`、`checks`、`durationMs` 和 `requestId`。
+- 请求会优先使用调用方传入的 `x-request-id`，否则生成短随机 ID。错误响应会在顶层和 `error.requestId` 中返回该 ID，响应 header 也会带 `x-request-id`。
+- ES 查询会记录 duration；超过 `observability.slowQueryMs` 时输出慢查询日志。日志只包含 requestId、操作名、索引数量、limit 等摘要信息，不包含 token 或完整日志正文。
+
+可选配置示例：
+
+```yaml
+observability:
+  slowQueryMs: 1000
+  readyTimeoutMs: 1000
+```
 
 ## 搜索性能与分页
 
@@ -159,8 +177,11 @@ rtk env PLUMELOG_GATEWAY_TOKEN=test ES_USERNAME=elastic ES_PASSWORD=secret npm r
 ```bash
 rtk env PLUMELOG_GATEWAY_BASE_URL=http://127.0.0.1:8787 \
   PLUMELOG_GATEWAY_TOKEN=test \
+  PLUMELOG_GATEWAY_TIMEOUT_MS=10000 \
   npm run mcp
 ```
+
+MCP 客户端默认超时为 `10000` ms，可通过 `PLUMELOG_GATEWAY_TIMEOUT_MS` 调整。网络错误以及 HTTP `502/503/504` 会有限重试，最多 3 次请求；超时、非 JSON 响应和网关错误会以结构化 JSON tool error 返回，至少包含 `code`、`message`、`status` 和 `requestId`。
 
 ## Docker 构建与运行
 

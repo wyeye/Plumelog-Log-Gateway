@@ -8,6 +8,6 @@ export function registerSearchRoute(app: FastifyInstance, repository: PlumelogRe
     const principal = requirePrincipal(request);
     enforceScope(principal, 'logs:search');
     const body = searchRequestSchema.parse(request.body);
-    return repository.searchLogs(enforceRequestPolicy(principal, body), principal);
+    return repository.searchLogs(enforceRequestPolicy(principal, body), principal, { requestId: request.id });
   });
 }

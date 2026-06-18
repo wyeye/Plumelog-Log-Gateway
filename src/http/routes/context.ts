@@ -8,6 +8,6 @@ export function registerContextRoute(app: FastifyInstance, repository: PlumelogR
     const principal = requirePrincipal(request);
     enforceScope(principal, 'logs:context');
     const body = contextRequestSchema.parse(request.body);
-    return repository.getContext(enforceRequestPolicy(principal, body), principal);
+    return repository.getContext(enforceRequestPolicy(principal, body), principal, { requestId: request.id });
   });
 }

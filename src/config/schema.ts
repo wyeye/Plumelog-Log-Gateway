@@ -81,6 +81,10 @@ export const configSchema = z.object({
     replacement: z.string().min(1).default('[REDACTED]'),
     maxInputChars: z.number().int().positive().default(200_000),
   }).default({}),
+  observability: z.object({
+    slowQueryMs: z.number().int().positive().default(1000),
+    readyTimeoutMs: z.number().int().positive().default(1000),
+  }).default({}),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

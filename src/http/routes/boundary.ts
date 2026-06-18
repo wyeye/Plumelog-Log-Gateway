@@ -8,6 +8,6 @@ export function registerBoundaryRoute(app: FastifyInstance, repository: Plumelog
     const principal = requirePrincipal(request);
     enforceScope(principal, 'logs:boundary');
     const body = boundaryRequestSchema.parse(request.body);
-    return repository.findBoundary(enforceRequestPolicy(principal, body), principal);
+    return repository.findBoundary(enforceRequestPolicy(principal, body), principal, { requestId: request.id });
   });
 }

@@ -3,39 +3,146 @@ import type { ContextRequest, ContextResponse } from '../schema/context.js';
 import type { MetaAppsQuery, MetaAppsResponse } from '../schema/meta.js';
 import type { SearchRequest, SearchResponse } from '../schema/search.js';
 import type { McpConfig } from './config.js';
+import { randomUUID } from 'node:crypto';
 
 interface GatewayErrorPayload {
+  requestId?: string;
   error?: {
     code?: string;
     message?: string;
     details?: Record<string, unknown>;
+    requestId?: string;
   };
 }
 
-function formatGatewayError(payload: GatewayErrorPayload): string {
-  const code = payload.error?.code ?? 'GATEWAY_ERROR';
-  const message = payload.error?.message ?? 'gateway request failed';
-  return `${code}: ${message}`;
+export interface GatewayClientErrorPayload {
+  code: string;
+  message: string;
+  status: number;
+  requestId: string;
+  details?: Record<string, unknown>;
+}
+
+export class GatewayClientError extends Error {
+  constructor(public readonly payload: GatewayClientErrorPayload) {
+    super(payload.message);
+  }
+}
+
+function createRequestId(): string {
+  return randomUUID().replaceAll('-', '').slice(0, 16);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
+function isRetryableError(error: unknown): boolean {
+  if (error instanceof GatewayClientError) {
+    return isRetryableStatus(error.payload.status)
+      || error.payload.code === 'GATEWAY_NETWORK_ERROR'
+      || error.payload.code === 'GATEWAY_TIMEOUT';
+  }
+  return true;
+}
+
+function getGatewayRequestId(response: Response, payload?: GatewayErrorPayload): string | undefined {
+  return response.headers.get('x-request-id')
+    ?? payload?.requestId
+    ?? payload?.error?.requestId;
 }
 
 export class GatewayClient {
   constructor(private readonly config: McpConfig) {}
 
-  private async request<T>(path: string, init: RequestInit): Promise<T> {
-    const response = await fetch(`${this.config.gatewayBaseUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${this.config.apiToken}`,
-        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-        ...init.headers,
-      },
-    });
-
-    const payload = await response.json() as T | GatewayErrorPayload;
-    if (!response.ok) {
-      throw new Error(formatGatewayError(payload as GatewayErrorPayload));
+  private async fetchWithTimeout(path: string, init: RequestInit, requestId: string): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, this.config.timeoutMs);
+    try {
+      return await fetch(`${this.config.gatewayBaseUrl}${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${this.config.apiToken}`,
+          'x-request-id': requestId,
+          ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+          ...init.headers,
+        },
+      });
+    } catch (error) {
+      const isTimeout = error instanceof Error && error.name === 'AbortError';
+      throw new GatewayClientError({
+        code: isTimeout ? 'GATEWAY_TIMEOUT' : 'GATEWAY_NETWORK_ERROR',
+        message: isTimeout ? 'gateway request timed out' : 'gateway network request failed',
+        status: 0,
+        requestId,
+        details: { timeoutMs: this.config.timeoutMs },
+      });
+    } finally {
+      clearTimeout(timeout);
     }
+  }
+
+  private async parseResponse<T>(response: Response, requestId: string): Promise<T> {
+    const text = await response.text();
+    let payload: T | GatewayErrorPayload | null = null;
+    if (text.length > 0) {
+      try {
+        payload = JSON.parse(text) as T | GatewayErrorPayload;
+      } catch {
+        throw new GatewayClientError({
+          code: 'GATEWAY_NON_JSON_RESPONSE',
+          message: 'gateway returned a non-JSON response',
+          status: response.status,
+          requestId: response.headers.get('x-request-id') ?? requestId,
+          details: {
+            bodyPreview: text.slice(0, 500),
+          },
+        });
+      }
+    }
+
+    if (!response.ok) {
+      const errorPayload = (payload ?? {}) as GatewayErrorPayload;
+      throw new GatewayClientError({
+        code: errorPayload.error?.code ?? 'GATEWAY_HTTP_ERROR',
+        message: errorPayload.error?.message ?? 'gateway request failed',
+        status: response.status,
+        requestId: getGatewayRequestId(response, errorPayload) ?? requestId,
+        details: errorPayload.error?.details,
+      });
+    }
+
     return payload as T;
+  }
+
+  private async request<T>(path: string, init: RequestInit): Promise<T> {
+    const requestId = createRequestId();
+    const maxAttempts = 3;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await this.fetchWithTimeout(path, init, requestId);
+        return await this.parseResponse<T>(response, requestId);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= maxAttempts || !isRetryableError(error)) {
+          throw error;
+        }
+        await sleep(100 * (2 ** (attempt - 1)));
+      }
+    }
+
+    throw lastError;
   }
 
   async listApps(query: MetaAppsQuery): Promise<MetaAppsResponse> {

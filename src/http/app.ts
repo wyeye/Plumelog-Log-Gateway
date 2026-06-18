@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { ZodError } from 'zod';
 import type { AuthPrincipal } from '../auth/authorize.js';
 import type { AppConfig } from '../config/schema.js';
 import { authorizeRequest } from '../auth/authorize.js';
 import { createElasticsearchClient } from '../es/client.js';
 import { PlumelogRepository } from '../es/repository.js';
-import { registerErrorHandler } from './errors.js';
+import { AppError, registerErrorHandler } from './errors.js';
 import { registerBoundaryRoute } from './routes/boundary.js';
 import { registerContextRoute } from './routes/context.js';
 import { registerHealthRoute } from './routes/health.js';
@@ -61,16 +62,37 @@ function auditContext(request: { body?: unknown; query?: unknown; url: string; a
   };
 }
 
+function createRequestId(): string {
+  return randomUUID().replaceAll('-', '').slice(0, 16);
+}
+
+function errorStatusCode(error: unknown, fallback: number): number {
+  if (error instanceof AppError) {
+    return error.statusCode;
+  }
+  if (error instanceof ZodError) {
+    return 400;
+  }
+  return fallback >= 400 ? fallback : 500;
+}
+
 export function buildApp(config: AppConfig): FastifyInstance {
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: true,
+    genReqId: (request) => request.headers['x-request-id']?.toString() || createRequestId(),
+  });
   const client = createElasticsearchClient(config);
-  const repository = new PlumelogRepository(client, config);
+  const repository = new PlumelogRepository(client, config, app.log);
 
   app.addHook('onRequest', async (request) => {
-    request.id = request.headers['x-request-id']?.toString() || randomUUID();
     if (request.url.startsWith('/api/v1/')) {
       request.auth = authorizeRequest(request, config);
     }
+  });
+
+  app.addHook('onSend', async (request, reply, payload) => {
+    reply.header('x-request-id', request.id);
+    return payload;
   });
 
   app.addHook('onSend', async (request, _reply, payload) => {
@@ -95,7 +117,7 @@ export function buildApp(config: AppConfig): FastifyInstance {
     }, 'audit request');
   });
 
-  app.addHook('onError', async (request, reply) => {
+  app.addHook('onError', async (request, reply, error) => {
     if (!request.url.startsWith('/api/v1/')) {
       return;
     }
@@ -103,7 +125,7 @@ export function buildApp(config: AppConfig): FastifyInstance {
       requestId: request.id,
       principal: request.auth?.name ?? null,
       endpoint: request.url,
-      status: reply.statusCode,
+      status: errorStatusCode(error, reply.statusCode),
       durationMs: Math.round(reply.elapsedTime),
       ...auditContext(request),
     }, 'audit request failed');
@@ -114,7 +136,7 @@ export function buildApp(config: AppConfig): FastifyInstance {
   });
 
   registerErrorHandler(app, config);
-  registerHealthRoute(app);
+  registerHealthRoute(app, config, repository);
   registerMetaRoute(app, config, repository);
   registerSearchRoute(app, repository);
   registerContextRoute(app, repository);

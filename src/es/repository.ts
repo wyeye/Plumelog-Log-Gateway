@@ -1,4 +1,5 @@
 import type { Client } from '@elastic/elasticsearch';
+import type { FastifyBaseLogger } from 'fastify';
 import { appEnvAllowed, type AuthPrincipal } from '../auth/authorize.js';
 import type { AppConfig } from '../config/schema.js';
 import type { BoundaryRequest } from '../schema/boundary.js';
@@ -14,6 +15,12 @@ import { mapBoundaryRecord, mapContextLog, mapContextLogs, mapSearchResponse, ty
 import { buildBoundaryQuery, buildSearchQuery } from './queryBuilders.js';
 
 const SEARCH_COLUMNS = ['index', 'id', 'timestamp', 'app', 'env', 'level', 'traceId', 'host', 'logger', 'method', 'contentPreview', 'contentTruncated'];
+
+export interface RepositoryRequestContext {
+  requestId?: string;
+}
+
+type RepositoryLogger = Pick<FastifyBaseLogger, 'warn' | 'debug'>;
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -43,10 +50,58 @@ export class PlumelogRepository {
   constructor(
     private readonly client: Client,
     private readonly config: AppConfig,
+    private readonly logger?: RepositoryLogger,
   ) {}
 
   async close(): Promise<void> {
     await this.client.close();
+  }
+
+  async ping(timeoutMs: number): Promise<void> {
+    try {
+      await this.client.ping({}, { requestTimeout: timeoutMs });
+    } catch (error) {
+      throw wrapElasticsearchError(error);
+    }
+  }
+
+  private async timedEsCall<T>(
+    operation: string,
+    context: RepositoryRequestContext | undefined,
+    details: Record<string, unknown>,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = Date.now();
+    try {
+      const result = await action();
+      const durationMs = Date.now() - startedAt;
+      if (durationMs >= this.config.observability.slowQueryMs) {
+        this.logger?.warn({
+          requestId: context?.requestId,
+          operation,
+          durationMs,
+          slowQueryMs: this.config.observability.slowQueryMs,
+          ...details,
+        }, 'slow elasticsearch query');
+      } else {
+        this.logger?.debug({
+          requestId: context?.requestId,
+          operation,
+          durationMs,
+          ...details,
+        }, 'elasticsearch query');
+      }
+      return result;
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      this.logger?.warn({
+        requestId: context?.requestId,
+        operation,
+        durationMs,
+        ...details,
+      }, 'elasticsearch query failed');
+      throw error;
+    }
   }
 
   private validateLimit(limit: number): void {
@@ -87,14 +142,23 @@ export class PlumelogRepository {
     };
   }
 
-  private async resolveExistingRunIndices(from: string, to: string): Promise<{ indices: string[]; warnings: GatewayWarning[] }> {
+  private async resolveExistingRunIndices(
+    from: string,
+    to: string,
+    context?: RepositoryRequestContext,
+  ): Promise<{ indices: string[]; warnings: GatewayWarning[] }> {
     const patterns = resolveRunIndexPatterns(this.config, from, to);
     const indices: string[] = [];
     const warnings: GatewayWarning[] = [];
 
     const resolved = await mapWithConcurrency(patterns, this.config.elasticsearch.indexResolveConcurrency, async (pattern) => {
       try {
-        const exists = await this.client.indices.exists({ index: pattern });
+        const exists = await this.timedEsCall(
+          'indices.exists',
+          context,
+          { indexPattern: pattern },
+          () => this.client.indices.exists({ index: pattern }),
+        );
         const body = typeof exists === 'boolean' ? exists : Boolean((exists as any).body);
         return { pattern, exists: body };
       } catch (error) {
@@ -128,10 +192,10 @@ export class PlumelogRepository {
     return filters;
   }
 
-  async listApps(query: MetaAppsQuery, principal?: AuthPrincipal) {
+  async listApps(query: MetaAppsQuery, principal?: AuthPrincipal, context?: RepositoryRequestContext) {
     const timeRange = resolveOptionalTimeRange(query.from, query.to, this.config.meta.defaultTimeRangeHours);
     this.validateSearchRange(timeRange.from, timeRange.to);
-    const { indices, warnings } = await this.resolveExistingRunIndices(timeRange.from, timeRange.to);
+    const { indices, warnings } = await this.resolveExistingRunIndices(timeRange.from, timeRange.to, context);
     if (indices.length === 0) {
       return {
         schema: 'plumelog.apps.v1',
@@ -142,7 +206,7 @@ export class PlumelogRepository {
     }
 
     try {
-      const response = await this.client.search({
+      const response = await this.timedEsCall('search.meta.apps', context, { indicesCount: indices.length }, () => this.client.search({
         index: indices,
         size: 0,
         track_total_hits: false,
@@ -179,7 +243,7 @@ export class PlumelogRepository {
             },
           },
         },
-      });
+      }));
       const appsAgg = (response as any).body.aggregations?.apps;
       const resultWarnings = [...warnings];
       if (Number(appsAgg?.sum_other_doc_count ?? 0) > 0) {
@@ -229,7 +293,7 @@ export class PlumelogRepository {
     return { redactContent: !(principal?.allowRawContent ?? false) };
   }
 
-  async searchLogs(request: SearchRequest, principal?: AuthPrincipal) {
+  async searchLogs(request: SearchRequest, principal?: AuthPrincipal, context?: RepositoryRequestContext) {
     const normalizedRequest: SearchRequest = {
       ...request,
       filters: this.normalizeFilters(request.filters),
@@ -272,7 +336,7 @@ export class PlumelogRepository {
       }
     }
 
-    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to);
+    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to, context);
     const searchWarnings = legacyUnsignedCursor
       ? [
           ...warnings,
@@ -301,10 +365,13 @@ export class PlumelogRepository {
 
     const primaryCursor = cursor;
     try {
-      const response = await this.client.search({
+      const response = await this.timedEsCall('search.logs', context, {
+        indicesCount: indices.length,
+        limit: normalizedRequest.limit,
+      }, () => this.client.search({
         index: indices,
         body: buildSearchQuery(this.config, normalizedRequest, primaryCursor),
-      });
+      }));
       return mapSearchResponse(
         this.config,
         (response as any).body,
@@ -319,7 +386,7 @@ export class PlumelogRepository {
     }
   }
 
-  async findBoundary(request: BoundaryRequest, principal?: AuthPrincipal) {
+  async findBoundary(request: BoundaryRequest, principal?: AuthPrincipal, context?: RepositoryRequestContext) {
     this.validateBoundaryRange(request.timeRange.from, request.timeRange.to);
 
     const normalizedRequest: BoundaryRequest = {
@@ -327,7 +394,7 @@ export class PlumelogRepository {
       filters: this.normalizeFilters(request.filters),
     };
 
-    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to);
+    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to, context);
     if (indices.length === 0) {
       return {
         schema: 'plumelog.boundary.v1',
@@ -337,10 +404,13 @@ export class PlumelogRepository {
     }
 
     try {
-      const response = await this.client.search({
+      const response = await this.timedEsCall('search.boundary', context, {
+        indicesCount: indices.length,
+        direction: normalizedRequest.direction,
+      }, () => this.client.search({
         index: indices,
         body: buildBoundaryQuery(this.config, normalizedRequest, normalizedRequest.direction, 'time_seq'),
-      });
+      }));
       const hit = (response as any).body?.hits?.hits?.[0] ?? null;
       return {
         schema: 'plumelog.boundary.v1',
@@ -362,9 +432,9 @@ export class PlumelogRepository {
     }
   }
 
-  private async getCenterLog(index: string, id: string) {
+  private async getCenterLog(index: string, id: string, context?: RepositoryRequestContext) {
     try {
-      const response = await this.client.get({ index, id });
+      const response = await this.timedEsCall('get.context.center', context, { index }, () => this.client.get({ index, id }));
       return {
         _index: (response as any).body._index,
         _id: (response as any).body._id,
@@ -380,9 +450,17 @@ export class PlumelogRepository {
     }
   }
 
-  private async getLogsByTraceId(indices: string[], traceId: string, from: string, to: string, limit: number, principal?: AuthPrincipal) {
+  private async getLogsByTraceId(
+    indices: string[],
+    traceId: string,
+    from: string,
+    to: string,
+    limit: number,
+    principal?: AuthPrincipal,
+    context?: RepositoryRequestContext,
+  ) {
     try {
-      return await this.client.search({
+      return await this.timedEsCall('search.context.trace', context, { indicesCount: indices.length, limit }, () => this.client.search({
         index: indices,
         size: limit,
         body: {
@@ -397,15 +475,24 @@ export class PlumelogRepository {
           },
           sort: [{ [this.config.plumelog.fields.time]: { order: 'asc' } }],
         },
-      });
+      }));
     } catch (error) {
       throw wrapElasticsearchError(error);
     }
   }
 
-  private async getNearbyLogs(indices: string[], app: string, host: string, from: string, to: string, limit: number, principal?: AuthPrincipal) {
+  private async getNearbyLogs(
+    indices: string[],
+    app: string,
+    host: string,
+    from: string,
+    to: string,
+    limit: number,
+    principal?: AuthPrincipal,
+    context?: RepositoryRequestContext,
+  ) {
     try {
-      return await this.client.search({
+      return await this.timedEsCall('search.context.nearby', context, { indicesCount: indices.length, limit }, () => this.client.search({
         index: indices,
         size: limit,
         body: {
@@ -421,13 +508,13 @@ export class PlumelogRepository {
           },
           sort: [{ [this.config.plumelog.fields.time]: { order: 'asc' } }],
         },
-      });
+      }));
     } catch (error) {
       throw wrapElasticsearchError(error);
     }
   }
 
-  async getContext(request: ContextRequest, principal?: AuthPrincipal) {
+  async getContext(request: ContextRequest, principal?: AuthPrincipal, context?: RepositoryRequestContext) {
     this.validateLimit(request.limit);
     this.validateSearchRange(request.timeRange.from, request.timeRange.to);
     if ((request.context?.timeWindowSeconds ?? this.config.limits.contextDefaultWindowSeconds) > this.config.limits.contextMaxWindowSeconds) {
@@ -437,7 +524,7 @@ export class PlumelogRepository {
     let center: any = null;
     if (request.center) {
       this.validateCenterIndex(request.center.index, request.timeRange.from, request.timeRange.to);
-      center = await this.getCenterLog(request.center.index, request.center.id);
+      center = await this.getCenterLog(request.center.index, request.center.id, context);
       if (!appEnvAllowed(
         principal,
         center._source?.[this.config.plumelog.fields.app],
@@ -448,7 +535,7 @@ export class PlumelogRepository {
     }
 
     const traceId = request.traceId ?? center?._source?.[this.config.plumelog.fields.traceId] ?? null;
-    const { indices, warnings } = await this.resolveExistingRunIndices(request.timeRange.from, request.timeRange.to);
+    const { indices, warnings } = await this.resolveExistingRunIndices(request.timeRange.from, request.timeRange.to, context);
     if (indices.length === 0) {
       return {
         schema: 'plumelog.context.v1',
@@ -464,7 +551,15 @@ export class PlumelogRepository {
     }
 
     if (traceId) {
-      const traceLogsResponse = await this.getLogsByTraceId(indices, traceId, request.timeRange.from, request.timeRange.to, request.limit, principal);
+      const traceLogsResponse = await this.getLogsByTraceId(
+        indices,
+        traceId,
+        request.timeRange.from,
+        request.timeRange.to,
+        request.limit,
+        principal,
+        context,
+      );
       return {
         schema: 'plumelog.context.v1',
         center: center ? mapContextLog(this.config, center, this.mapOptions(principal)) : null,
@@ -497,6 +592,7 @@ export class PlumelogRepository {
       nearbyRange.to,
       request.limit,
       principal,
+      context,
     );
 
     return {
