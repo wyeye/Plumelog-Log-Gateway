@@ -5,6 +5,11 @@ const apiKeySchema = z.object({
   token: z.string().min(1),
 });
 
+const nullableNonEmptyStringSchema = z.preprocess(
+  (value) => (value === '' ? null : value),
+  z.string().min(1).nullable(),
+);
+
 export const configSchema = z.object({
   server: z.object({
     port: z.number().int().min(1).max(65535),
@@ -51,6 +56,14 @@ export const configSchema = z.object({
   meta: z.object({
     defaultTimeRangeHours: z.number().positive(),
   }),
+  search: z.object({
+    trackTotalHits: z.union([z.boolean(), z.number().int().nonnegative()]).default(false),
+    sourceFiltering: z.boolean().default(true),
+    tieBreakerField: nullableNonEmptyStringSchema.default(null),
+  }).default({}),
+  cursor: z.object({
+    signingSecret: nullableNonEmptyStringSchema.default(null),
+  }).default({}),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

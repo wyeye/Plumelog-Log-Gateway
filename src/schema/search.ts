@@ -16,6 +16,7 @@ export const searchResponseSchema = z.object({
   summary: z.object({
     total: z.number().int().nonnegative(),
     totalRelation: z.enum(['eq', 'gte']),
+    totalKnown: z.boolean(),
     hasMore: z.boolean(),
     nextCursor: z.string().nullable(),
   }),

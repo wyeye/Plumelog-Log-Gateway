@@ -42,7 +42,9 @@ export function mapSearchResponse(
   warnings: GatewayWarning[] = [],
 ) {
   const hits = response.hits?.hits ?? [];
-  const rows = hits.map((hit: any) => {
+  const hasMore = hits.length > limit;
+  const pageHits = hits.slice(0, limit);
+  const rows = pageHits.map((hit: any) => {
     const source = hit._source ?? {};
     const preview = buildContentPreview(
       String(source[config.plumelog.fields.message] ?? ''),
@@ -63,17 +65,23 @@ export function mapSearchResponse(
       preview.contentTruncated,
     ];
   });
-  const lastSort = hits.length > 0 ? hits[hits.length - 1].sort : null;
+  const lastSort = hasMore && pageHits.length > 0 ? pageHits[pageHits.length - 1].sort : null;
   const total = response.hits?.total;
+  const totalValue = typeof total === 'number' ? total : total?.value ?? 0;
+  const totalRelation = config.search.trackTotalHits === false
+    ? 'gte'
+    : typeof total === 'number' ? 'eq' : total?.relation ?? 'eq';
+  const totalKnown = config.search.trackTotalHits !== false && totalRelation === 'eq';
 
   return {
     schema: 'plumelog.search.v1',
     summary: {
-      total: typeof total === 'number' ? total : total?.value ?? 0,
-      totalRelation: typeof total === 'number' ? 'eq' : total?.relation ?? 'eq',
-      hasMore: hits.length === limit,
+      total: totalValue,
+      totalRelation,
+      totalKnown,
+      hasMore,
       nextCursor: lastSort
-        ? encodeCursor({ version: 1, sortMode, values: lastSort, queryHash })
+        ? encodeCursor(config, { sortMode, values: lastSort, queryHash })
         : null,
     },
     columns: [...SEARCH_COLUMNS],

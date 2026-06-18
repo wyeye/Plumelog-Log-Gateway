@@ -155,37 +155,65 @@ export class PlumelogRepository {
     this.validateLimit(normalizedRequest.limit);
     this.validateSearchRange(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to);
 
-    const queryHash = buildQueryHash({
+    const legacyQueryHash = buildQueryHash({
       timeRange: normalizedRequest.timeRange,
       filters: normalizedRequest.filters,
       limit: normalizedRequest.limit,
     });
 
     let cursor = null;
+    let legacyUnsignedCursor = false;
     if (normalizedRequest.cursor) {
       try {
-        cursor = decodeCursor(normalizedRequest.cursor);
+        const decoded = decodeCursor(this.config, normalizedRequest.cursor);
+        cursor = decoded.cursor;
+        legacyUnsignedCursor = decoded.legacyUnsigned;
       } catch {
         throw new AppError('CURSOR_INVALID', 400, {}, 'cursor is invalid');
       }
-      if (cursor.queryHash !== queryHash) {
+      if (legacyUnsignedCursor && this.config.search.tieBreakerField) {
+        throw new AppError('CURSOR_INVALID', 400, {}, 'legacy cursor cannot be used after tie-breaker sort changes');
+      }
+    }
+    const effectiveSortMode = cursor?.sortMode ?? 'time_seq';
+    const queryHash = buildQueryHash({
+      timeRange: normalizedRequest.timeRange,
+      filters: normalizedRequest.filters,
+      limit: normalizedRequest.limit,
+      sortMode: effectiveSortMode,
+      tieBreakerField: effectiveSortMode === 'time_seq' ? this.config.search.tieBreakerField : null,
+    });
+    if (cursor) {
+      const expectedQueryHash = legacyUnsignedCursor ? legacyQueryHash : queryHash;
+      if (cursor.queryHash !== expectedQueryHash) {
         throw new AppError('CURSOR_INVALID', 400, {}, 'cursor does not match current query');
       }
     }
 
     const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to);
+    const searchWarnings = legacyUnsignedCursor
+      ? [
+          ...warnings,
+          {
+            code: 'CURSOR_LEGACY_UNSIGNED',
+            message: 'legacy unsigned cursor was accepted for compatibility; use the returned signed cursor for subsequent pages',
+            details: {},
+          },
+        ]
+      : warnings;
     if (indices.length === 0) {
       return {
         schema: 'plumelog.search.v1',
         summary: {
           total: 0,
           totalRelation: 'eq',
+          totalKnown: true,
           hasMore: false,
           nextCursor: null,
         },
         columns: SEARCH_COLUMNS,
         rows: [],
-        warnings,
+        warnings: searchWarnings,
       };
     }
 
@@ -201,28 +229,8 @@ export class PlumelogRepository {
         primaryCursor?.sortMode ?? 'time_seq',
         queryHash,
         normalizedRequest.limit,
-        warnings,
+        searchWarnings,
       );
-    } catch (error) {
-      if (!String(error).includes(this.config.plumelog.fields.seq)) {
-        throw wrapElasticsearchError(error);
-      }
-    }
-
-    try {
-      const fallbackCursor = primaryCursor ? { ...primaryCursor, sortMode: 'time_only' as const } : null;
-      const response = await this.client.search({
-        index: indices,
-        body: buildSearchQuery(this.config, normalizedRequest, fallbackCursor),
-      });
-      return mapSearchResponse(this.config, (response as any).body, 'time_only', queryHash, normalizedRequest.limit, [
-        ...warnings,
-        {
-          code: 'SEQ_SORT_UNAVAILABLE',
-          message: 'seq field is unavailable; falling back to dtTime-only sort',
-          details: {},
-        },
-      ]);
     } catch (error) {
       throw wrapElasticsearchError(error);
     }
@@ -264,29 +272,7 @@ export class PlumelogRepository {
           };
         }
       } catch (error) {
-        if (!String(error).includes(this.config.plumelog.fields.seq)) {
-          throw wrapElasticsearchError(error);
-        }
-
-        const fallback = await this.client.search({
-          index,
-          body: buildBoundaryQuery(this.config, normalizedRequest, normalizedRequest.direction, 'time_only'),
-        });
-        const hit = (fallback as any).body?.hits?.hits?.[0] ?? null;
-        if (hit) {
-          return {
-            schema: 'plumelog.boundary.v1',
-            record: mapBoundaryRecord(this.config, hit),
-            warnings: [
-              ...warnings,
-              {
-                code: 'SEQ_SORT_UNAVAILABLE',
-                message: 'seq field is unavailable; falling back to dtTime-only sort',
-                details: {},
-              },
-            ],
-          };
-        }
+        throw wrapElasticsearchError(error);
       }
     }
 

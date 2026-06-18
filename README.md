@@ -46,6 +46,26 @@ Elasticsearch / Plumelog indices
 - `POST /api/v1/logs/context`
 - `POST /api/v1/logs/boundary`
 
+## 搜索性能与分页
+
+搜索接口默认面向大日志量场景优化：
+
+- `search.trackTotalHits` 默认 `false`，ES 不做精确总数统计。响应仍保留 `summary.total` 和 `summary.totalRelation`，并新增 `summary.totalKnown`；当 `totalKnown=false` 时，不应把 `total` 当作精确总数展示。
+- 服务端会向 ES 请求 `limit + 1` 条日志，用多出来的一条判断 `summary.hasMore`。返回给调用方的 `rows` 仍最多为 `limit` 条；只有存在下一页时才返回 `summary.nextCursor`。
+- `search.sourceFiltering` 默认 `true`，搜索只拉取映射所需字段：时间、应用、环境、级别、traceId、主机、logger、method、thread 和日志正文，用于生成 `contentPreview`。
+- 新 cursor 使用 HMAC-SHA256 签名，篡改后会返回 `CURSOR_INVALID`。`cursor.signingSecret` 可显式配置；未配置时会从第一个 API key token 派生签名密钥，密钥不会输出到日志。
+
+可选配置示例：
+
+```yaml
+search:
+  trackTotalHits: false
+  sourceFiltering: true
+  tieBreakerField: null
+cursor:
+  signingSecret: ${PLUMELOG_CURSOR_SECRET}
+```
+
 `/api/v1/logs/boundary` 示例：
 
 ```json

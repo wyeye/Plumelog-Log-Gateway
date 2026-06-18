@@ -21,6 +21,10 @@
 - `limit` 范围为 `1-500`，并受服务端配置上限控制。
 - 同字段数组内部按 OR，不同字段之间按 AND。
 - `content.all` 表示全部命中，`content.any` 表示任一命中，`content.not` 表示排除命中。
+- 服务端用 `limit + 1` 条 ES 结果判断是否有下一页；响应 `rows` 仍最多返回 `limit` 条。
+- 默认 `search.trackTotalHits=false`，响应 `summary.totalKnown=false` 时，`summary.total` 不是精确总数。
+- 搜索默认启用 `_source.includes`，只拉取生成响应所需字段。
+- `summary.nextCursor` 使用签名 cursor；篡改或跨查询复用会返回 `CURSOR_INVALID`。
 
 ## Boundary Constraints
 
@@ -32,6 +36,8 @@
 ## Response Shapes
 
 - 搜索结果返回 `columns` + `rows`。
+- 搜索摘要包含 `total`、`totalRelation`、`totalKnown`、`hasMore`、`nextCursor`。
+- `hasMore=true` 表示可用 `nextCursor` 继续翻页；最后一页 `hasMore=false` 且 `nextCursor=null`。
 - 上下文结果返回 `center`、`traceLogs`、`nearbyLogs`、`resolution`。
 - 边界结果返回 `record` 对象或 `null`。
 - 错误统一返回 `error.code`、`error.message`、`error.details`。

@@ -3,6 +3,7 @@ import type { SearchRequest } from '../schema/search.js';
 import type { SearchCursor } from './cursor.js';
 
 type Clause = Record<string, unknown>;
+type SortOrder = 'asc' | 'desc';
 
 export interface LogQueryClauses {
   filter: Clause[];
@@ -34,6 +35,74 @@ function pushPhraseClauses(target: Clause[], field: string, values: string[] | u
   for (const value of values ?? []) {
     target.push({ match_phrase: { [field]: value } });
   }
+}
+
+function buildSourceFilter(config: AppConfig): Record<string, string[]> | undefined {
+  if (!config.search.sourceFiltering) {
+    return undefined;
+  }
+
+  return {
+    includes: [
+      config.plumelog.fields.time,
+      config.plumelog.fields.app,
+      config.plumelog.fields.env,
+      config.plumelog.fields.level,
+      config.plumelog.fields.traceId,
+      config.plumelog.fields.host,
+      config.plumelog.fields.logger,
+      config.plumelog.fields.method,
+      config.plumelog.fields.thread,
+      config.plumelog.fields.message,
+    ],
+  };
+}
+
+function buildSortField(field: string, order: SortOrder): Clause {
+  return {
+    [field]: {
+      order,
+      unmapped_type: 'keyword',
+      missing: order === 'desc' ? '_last' : '_first',
+    },
+  };
+}
+
+function buildTimeSortField(field: string, order: SortOrder): Clause {
+  return {
+    [field]: {
+      order,
+      unmapped_type: 'date',
+      missing: order === 'desc' ? '_last' : '_first',
+    },
+  };
+}
+
+function buildSeqSortField(field: string, order: SortOrder): Clause {
+  return {
+    [field]: {
+      order,
+      unmapped_type: 'long',
+      missing: order === 'desc' ? '_last' : '_first',
+    },
+  };
+}
+
+export function buildLogSort(
+  config: AppConfig,
+  sortMode: SearchCursor['sortMode'],
+  order: SortOrder,
+): Clause[] {
+  const sort = [buildTimeSortField(config.plumelog.fields.time, order)];
+
+  if (sortMode !== 'time_only') {
+    sort.push(buildSeqSortField(config.plumelog.fields.seq, order));
+    if (config.search.tieBreakerField) {
+      sort.push(buildSortField(config.search.tieBreakerField, order));
+    }
+  }
+
+  return sort;
 }
 
 export function buildLogQueryClauses(
@@ -76,20 +145,17 @@ export function buildLogQueryClauses(
 
 export function buildSearchQuery(config: AppConfig, request: SearchRequest, cursor: SearchCursor | null): Record<string, unknown> {
   const clauses = buildLogQueryClauses(config, request);
+  const sourceFilter = buildSourceFilter(config);
 
   return {
     query: {
       bool: clauses,
     },
-    sort: cursor?.sortMode === 'time_only'
-      ? [{ [config.plumelog.fields.time]: { order: 'desc' } }]
-      : [
-          { [config.plumelog.fields.time]: { order: 'desc' } },
-          { [config.plumelog.fields.seq]: { order: 'desc' } },
-        ],
-    size: request.limit,
+    sort: buildLogSort(config, cursor?.sortMode ?? 'time_seq', 'desc'),
+    size: request.limit + 1,
     ...(cursor && cursor.values.length > 0 ? { search_after: cursor.values } : {}),
-    track_total_hits: true,
+    track_total_hits: config.search.trackTotalHits,
+    ...(sourceFilter ? { _source: sourceFilter } : {}),
   };
 }
 
@@ -106,12 +172,7 @@ export function buildBoundaryQuery(
     query: {
       bool: clauses,
     },
-    sort: sortMode === 'time_only'
-      ? [{ [config.plumelog.fields.time]: { order } }]
-      : [
-          { [config.plumelog.fields.time]: { order } },
-          { [config.plumelog.fields.seq]: { order } },
-        ],
+    sort: buildLogSort(config, sortMode, order),
     size: 1,
     track_total_hits: false,
   };
