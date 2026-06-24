@@ -23,6 +23,19 @@ export interface GatewayClientErrorPayload {
   details?: Record<string, unknown>;
 }
 
+export interface GatewayResponseMeta {
+  requestId: string;
+  durationMs: number;
+  attempts: number;
+  path: string;
+  method: string;
+}
+
+export interface GatewayResponseEnvelope<T> {
+  data: T;
+  meta: GatewayResponseMeta;
+}
+
 export class GatewayClientError extends Error {
   constructor(public readonly payload: GatewayClientErrorPayload) {
     super(payload.message);
@@ -84,7 +97,11 @@ export class GatewayClient {
         message: isTimeout ? 'gateway request timed out' : 'gateway network request failed',
         status: 0,
         requestId,
-        details: { timeoutMs: this.config.timeoutMs },
+        details: {
+          timeoutMs: this.config.timeoutMs,
+          path,
+          method: init.method ?? 'GET',
+        },
       });
     } finally {
       clearTimeout(timeout);
@@ -124,17 +141,38 @@ export class GatewayClient {
     return payload as T;
   }
 
-  private async request<T>(path: string, init: RequestInit): Promise<T> {
+  private async requestEnvelope<T>(path: string, init: RequestInit): Promise<GatewayResponseEnvelope<T>> {
     const requestId = createRequestId();
     const maxAttempts = 3;
+    const startedAt = Date.now();
+    const method = init.method ?? 'GET';
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         const response = await this.fetchWithTimeout(path, init, requestId);
-        return await this.parseResponse<T>(response, requestId);
+        const data = await this.parseResponse<T>(response, requestId);
+        return {
+          data,
+          meta: {
+            requestId,
+            durationMs: Date.now() - startedAt,
+            attempts: attempt,
+            path,
+            method,
+          },
+        };
       } catch (error) {
         lastError = error;
+        if (error instanceof GatewayClientError) {
+          error.payload.details = {
+            ...error.payload.details,
+            attempts: attempt,
+            durationMs: Date.now() - startedAt,
+            path,
+            method,
+          };
+        }
         if (attempt >= maxAttempts || !isRetryableError(error)) {
           throw error;
         }
@@ -143,6 +181,11 @@ export class GatewayClient {
     }
 
     throw lastError;
+  }
+
+  private async request<T>(path: string, init: RequestInit): Promise<T> {
+    const response = await this.requestEnvelope<T>(path, init);
+    return response.data;
   }
 
   async listApps(query: MetaAppsQuery): Promise<MetaAppsResponse> {
@@ -159,6 +202,13 @@ export class GatewayClient {
 
   async searchLogs(body: SearchRequest): Promise<SearchResponse> {
     return this.request<SearchResponse>('/api/v1/logs/search', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async searchLogsDetailed(body: SearchRequest): Promise<GatewayResponseEnvelope<SearchResponse>> {
+    return this.requestEnvelope<SearchResponse>('/api/v1/logs/search', {
       method: 'POST',
       body: JSON.stringify(body),
     });

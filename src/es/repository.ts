@@ -11,16 +11,43 @@ import { ensureContentTermTotal, normalizeContentTerms, normalizeValues } from '
 import { clampTimeRange, ensureRangeHours, resolveOptionalTimeRange } from '../utils/time.js';
 import { buildQueryHash, decodeCursor } from './cursor.js';
 import { resolveRunIndexPatterns } from './indexing.js';
-import { mapBoundaryRecord, mapContextLog, mapContextLogs, mapSearchResponse, type GatewayWarning } from './mappers.js';
+import { mapBoundaryRecord, mapContextLog, mapContextLogs, mapSearchResponse, searchColumnsForMode, type GatewayWarning } from './mappers.js';
 import { buildBoundaryQuery, buildSearchQuery } from './queryBuilders.js';
-
-const SEARCH_COLUMNS = ['index', 'id', 'timestamp', 'app', 'env', 'level', 'traceId', 'host', 'logger', 'method', 'contentPreview', 'contentTruncated'];
 
 export interface RepositoryRequestContext {
   requestId?: string;
 }
 
+interface PhaseMetrics {
+  indexResolveMs?: number;
+  queryMs?: number;
+}
+
+interface SearchDiagnostics {
+  phase: string;
+  queryDigest?: string;
+  indicesCount?: number;
+  indexPatternsCount?: number;
+  indexPattern?: string;
+  limit?: number;
+  cursorProvided?: boolean;
+  cursorSortMode?: string;
+  pagingPosition?: string;
+  contentMode?: string;
+  direction?: string;
+  centerIndex?: string;
+  contextMode?: string;
+  phaseMetrics?: PhaseMetrics;
+}
+
 type RepositoryLogger = Pick<FastifyBaseLogger, 'warn' | 'debug'>;
+
+function withPhaseTiming<T extends Record<string, unknown>>(details: T, phaseMetrics: PhaseMetrics): T & { phaseMetrics: PhaseMetrics } {
+  return {
+    ...details,
+    phaseMetrics,
+  };
+}
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -118,6 +145,16 @@ export class PlumelogRepository {
     ensureRangeHours(from, to, 31 * 24);
   }
 
+  private buildSearchDiagnostics(
+    phase: string,
+    extra: Omit<SearchDiagnostics, 'phase'> = {},
+  ): SearchDiagnostics {
+    return {
+      phase,
+      ...extra,
+    };
+  }
+
   private normalizeFilters(filters: SearchRequest['filters']): SearchRequest['filters'] {
     const contentAll = normalizeContentTerms(filters.content?.all, this.config.limits.maxContentTermLength);
     const contentAny = normalizeContentTerms(filters.content?.any, this.config.limits.maxContentTermLength);
@@ -145,6 +182,7 @@ export class PlumelogRepository {
   private async resolveExistingRunIndices(
     from: string,
     to: string,
+    diagnostics: Omit<SearchDiagnostics, 'phase'> = {},
     context?: RepositoryRequestContext,
   ): Promise<{ indices: string[]; warnings: GatewayWarning[] }> {
     const patterns = resolveRunIndexPatterns(this.config, from, to);
@@ -156,13 +194,17 @@ export class PlumelogRepository {
         const exists = await this.timedEsCall(
           'indices.exists',
           context,
-          { indexPattern: pattern },
+          { indexPattern: pattern, queryDigest: diagnostics.queryDigest },
           () => this.client.indices.exists({ index: pattern }),
         );
         const body = typeof exists === 'boolean' ? exists : Boolean((exists as any).body);
         return { pattern, exists: body };
       } catch (error) {
-        throw wrapElasticsearchError(error);
+        throw wrapElasticsearchError(error, this.buildSearchDiagnostics('index_resolve', {
+          ...diagnostics,
+          indexPattern: pattern,
+          indexPatternsCount: patterns.length,
+        }));
       }
     });
 
@@ -195,7 +237,9 @@ export class PlumelogRepository {
   async listApps(query: MetaAppsQuery, principal?: AuthPrincipal, context?: RepositoryRequestContext) {
     const timeRange = resolveOptionalTimeRange(query.from, query.to, this.config.meta.defaultTimeRangeHours);
     this.validateSearchRange(timeRange.from, timeRange.to);
-    const { indices, warnings } = await this.resolveExistingRunIndices(timeRange.from, timeRange.to, context);
+    const indexResolveStartedAt = Date.now();
+    const { indices, warnings } = await this.resolveExistingRunIndices(timeRange.from, timeRange.to, {}, context);
+    const phaseMetrics: PhaseMetrics = { indexResolveMs: Date.now() - indexResolveStartedAt };
     if (indices.length === 0) {
       return {
         schema: 'plumelog.apps.v1',
@@ -206,6 +250,7 @@ export class PlumelogRepository {
     }
 
     try {
+      const queryStartedAt = Date.now();
       const response = await this.timedEsCall('search.meta.apps', context, { indicesCount: indices.length }, () => this.client.search({
         index: indices,
         size: 0,
@@ -244,6 +289,7 @@ export class PlumelogRepository {
           },
         },
       }));
+      phaseMetrics.queryMs = Date.now() - queryStartedAt;
       const appsAgg = (response as any).body.aggregations?.apps;
       const resultWarnings = [...warnings];
       if (Number(appsAgg?.sum_other_doc_count ?? 0) > 0) {
@@ -285,7 +331,10 @@ export class PlumelogRepository {
         warnings: resultWarnings,
       };
     } catch (error) {
-      throw wrapElasticsearchError(error);
+      throw wrapElasticsearchError(error, this.buildSearchDiagnostics('meta_apps', withPhaseTiming({
+        indicesCount: indices.length,
+        indexPatternsCount: resolveRunIndexPatterns(this.config, timeRange.from, timeRange.to).length,
+      }, phaseMetrics)));
     }
   }
 
@@ -306,6 +355,12 @@ export class PlumelogRepository {
       filters: normalizedRequest.filters,
       limit: normalizedRequest.limit,
     });
+    const legacyQueryHashWithContentMode = buildQueryHash({
+      timeRange: normalizedRequest.timeRange,
+      filters: normalizedRequest.filters,
+      limit: normalizedRequest.limit,
+      contentMode: normalizedRequest.contentMode,
+    });
 
     let cursor = null;
     let legacyUnsignedCursor = false;
@@ -315,14 +370,21 @@ export class PlumelogRepository {
         cursor = decoded.cursor;
         legacyUnsignedCursor = decoded.legacyUnsigned;
       } catch {
-        throw new AppError('CURSOR_INVALID', 400, {}, 'cursor is invalid');
+        throw new AppError('CURSOR_INVALID', 400, {
+          pagingPosition: 'after_previous_page',
+          cursorProvided: true,
+        }, 'cursor is invalid');
       }
     }
     const effectiveSortMode = cursor?.sortMode ?? 'time_seq';
     if (!legacyUnsignedCursor && cursor?.version === 2 && cursor.tieBreakerType !== undefined && cursor.tieBreakerType !== this.config.search.tieBreakerType) {
-      throw new AppError('CURSOR_INVALID', 400, {}, 'cursor tie-breaker type does not match current query');
+      throw new AppError('CURSOR_INVALID', 400, {
+        pagingPosition: 'after_previous_page',
+        cursorProvided: true,
+        cursorSortMode: cursor.sortMode,
+      }, 'cursor tie-breaker type does not match current query');
     }
-    const queryHash = buildQueryHash({
+    const queryHashWithoutContentMode = buildQueryHash({
       timeRange: normalizedRequest.timeRange,
       filters: normalizedRequest.filters,
       limit: normalizedRequest.limit,
@@ -330,14 +392,43 @@ export class PlumelogRepository {
       tieBreakerField: effectiveSortMode === 'time_seq' ? this.config.search.tieBreakerField : null,
       tieBreakerType: effectiveSortMode === 'time_seq' && this.config.search.tieBreakerField ? this.config.search.tieBreakerType : null,
     });
+    const queryHash = buildQueryHash({
+      timeRange: normalizedRequest.timeRange,
+      filters: normalizedRequest.filters,
+      limit: normalizedRequest.limit,
+      sortMode: effectiveSortMode,
+      contentMode: normalizedRequest.contentMode,
+      tieBreakerField: effectiveSortMode === 'time_seq' ? this.config.search.tieBreakerField : null,
+      tieBreakerType: effectiveSortMode === 'time_seq' && this.config.search.tieBreakerField ? this.config.search.tieBreakerType : null,
+    });
+    let legacyContentModeCursor = false;
     if (cursor) {
-      const expectedQueryHash = legacyUnsignedCursor ? legacyQueryHash : queryHash;
-      if (cursor.queryHash !== expectedQueryHash) {
-        throw new AppError('CURSOR_INVALID', 400, {}, 'cursor does not match current query');
+      const expectedQueryHashes = legacyUnsignedCursor
+        ? [legacyQueryHash, legacyQueryHashWithContentMode]
+        : normalizedRequest.contentMode === 'preview'
+          ? [queryHash, queryHashWithoutContentMode]
+          : [queryHash];
+      if (!expectedQueryHashes.includes(cursor.queryHash)) {
+        throw new AppError('CURSOR_INVALID', 400, {
+          queryDigest: queryHash,
+          pagingPosition: 'after_previous_page',
+          cursorProvided: true,
+          cursorSortMode: cursor.sortMode,
+        }, 'cursor does not match current query');
       }
+      legacyContentModeCursor = !legacyUnsignedCursor && cursor.queryHash === queryHashWithoutContentMode && queryHashWithoutContentMode !== queryHash;
     }
 
-    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to, context);
+    const indexResolveStartedAt = Date.now();
+    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to, {
+      queryDigest: queryHash,
+      limit: normalizedRequest.limit,
+      cursorProvided: cursor !== null,
+      cursorSortMode: effectiveSortMode,
+      pagingPosition: cursor ? 'after_previous_page' : 'first_page',
+      contentMode: normalizedRequest.contentMode,
+    }, context);
+    const phaseMetrics: PhaseMetrics = { indexResolveMs: Date.now() - indexResolveStartedAt };
     const searchWarnings = legacyUnsignedCursor
       ? [
           ...warnings,
@@ -348,6 +439,13 @@ export class PlumelogRepository {
           },
         ]
       : warnings;
+    if (legacyContentModeCursor) {
+      searchWarnings.push({
+        code: 'CURSOR_LEGACY_CONTENT_MODE',
+        message: 'cursor issued before contentMode was added was accepted for preview mode compatibility; use the returned cursor for subsequent pages',
+        details: {},
+      });
+    }
     if (indices.length === 0) {
       return {
         schema: 'plumelog.search.v1',
@@ -359,7 +457,7 @@ export class PlumelogRepository {
           hasMore: false,
           nextCursor: null,
         },
-        columns: SEARCH_COLUMNS,
+        columns: searchColumnsForMode(normalizedRequest.contentMode),
         rows: [],
         warnings: searchWarnings,
       };
@@ -367,13 +465,19 @@ export class PlumelogRepository {
 
     const primaryCursor = cursor;
     try {
+      const queryStartedAt = Date.now();
       const response = await this.timedEsCall('search.logs', context, {
         indicesCount: indices.length,
         limit: normalizedRequest.limit,
+        queryDigest: queryHash,
+        cursorProvided: primaryCursor !== null,
+        pagingPosition: primaryCursor ? 'after_previous_page' : 'first_page',
+        contentMode: normalizedRequest.contentMode,
       }, () => this.client.search({
         index: indices,
         body: buildSearchQuery(this.config, normalizedRequest, primaryCursor),
       }));
+      phaseMetrics.queryMs = Date.now() - queryStartedAt;
       return mapSearchResponse(
         this.config,
         (response as any).body,
@@ -381,10 +485,22 @@ export class PlumelogRepository {
         queryHash,
         normalizedRequest.limit,
         searchWarnings,
-        this.mapOptions(principal),
+        {
+          ...this.mapOptions(principal),
+          contentMode: normalizedRequest.contentMode,
+        },
       );
     } catch (error) {
-      throw wrapElasticsearchError(error);
+      throw wrapElasticsearchError(error, this.buildSearchDiagnostics('search_logs', withPhaseTiming({
+        queryDigest: queryHash,
+        indicesCount: indices.length,
+        indexPatternsCount: resolveRunIndexPatterns(this.config, normalizedRequest.timeRange.from, normalizedRequest.timeRange.to).length,
+        limit: normalizedRequest.limit,
+        cursorProvided: primaryCursor !== null,
+        cursorSortMode: effectiveSortMode,
+        pagingPosition: primaryCursor ? 'after_previous_page' : 'first_page',
+        contentMode: normalizedRequest.contentMode,
+      }, phaseMetrics)));
     }
   }
 
@@ -396,7 +512,17 @@ export class PlumelogRepository {
       filters: this.normalizeFilters(request.filters),
     };
 
-    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to, context);
+    const boundaryQueryDigest = buildQueryHash({
+      timeRange: normalizedRequest.timeRange,
+      filters: normalizedRequest.filters,
+      direction: normalizedRequest.direction,
+    });
+    const indexResolveStartedAt = Date.now();
+    const { indices, warnings } = await this.resolveExistingRunIndices(normalizedRequest.timeRange.from, normalizedRequest.timeRange.to, {
+      queryDigest: boundaryQueryDigest,
+      direction: normalizedRequest.direction,
+    }, context);
+    const phaseMetrics: PhaseMetrics = { indexResolveMs: Date.now() - indexResolveStartedAt };
     if (indices.length === 0) {
       return {
         schema: 'plumelog.boundary.v1',
@@ -406,13 +532,16 @@ export class PlumelogRepository {
     }
 
     try {
+      const queryStartedAt = Date.now();
       const response = await this.timedEsCall('search.boundary', context, {
         indicesCount: indices.length,
         direction: normalizedRequest.direction,
+        queryDigest: boundaryQueryDigest,
       }, () => this.client.search({
         index: indices,
         body: buildBoundaryQuery(this.config, normalizedRequest, normalizedRequest.direction, 'time_seq'),
       }));
+      phaseMetrics.queryMs = Date.now() - queryStartedAt;
       const hit = (response as any).body?.hits?.hits?.[0] ?? null;
       return {
         schema: 'plumelog.boundary.v1',
@@ -420,7 +549,12 @@ export class PlumelogRepository {
         warnings,
       };
     } catch (error) {
-      throw wrapElasticsearchError(error);
+      throw wrapElasticsearchError(error, this.buildSearchDiagnostics('search_boundary', withPhaseTiming({
+        queryDigest: boundaryQueryDigest,
+        indicesCount: indices.length,
+        indexPatternsCount: resolveRunIndexPatterns(this.config, normalizedRequest.timeRange.from, normalizedRequest.timeRange.to).length,
+        direction: normalizedRequest.direction,
+      }, phaseMetrics)));
     }
   }
 
@@ -448,7 +582,9 @@ export class PlumelogRepository {
       if (statusCode === 404) {
         throw new AppError('CENTER_LOG_NOT_FOUND', 404, { index, id }, 'center log not found');
       }
-      throw wrapElasticsearchError(error);
+      throw wrapElasticsearchError(error, this.buildSearchDiagnostics('get_context_center', {
+        centerIndex: index,
+      }));
     }
   }
 
@@ -462,6 +598,7 @@ export class PlumelogRepository {
     context?: RepositoryRequestContext,
   ) {
     try {
+      const queryDigest = buildQueryHash({ traceId, from, to, limit, mode: 'trace' });
       return await this.timedEsCall('search.context.trace', context, { indicesCount: indices.length, limit }, () => this.client.search({
         index: indices,
         size: limit,
@@ -479,7 +616,12 @@ export class PlumelogRepository {
         },
       }));
     } catch (error) {
-      throw wrapElasticsearchError(error);
+      throw wrapElasticsearchError(error, this.buildSearchDiagnostics('search_context_trace', {
+        queryDigest: buildQueryHash({ traceId, from, to, limit, mode: 'trace' }),
+        indicesCount: indices.length,
+        limit,
+        contextMode: 'traceId',
+      }));
     }
   }
 
@@ -494,6 +636,7 @@ export class PlumelogRepository {
     context?: RepositoryRequestContext,
   ) {
     try {
+      const queryDigest = buildQueryHash({ app, host, from, to, limit, mode: 'timeWindow' });
       return await this.timedEsCall('search.context.nearby', context, { indicesCount: indices.length, limit }, () => this.client.search({
         index: indices,
         size: limit,
@@ -512,7 +655,12 @@ export class PlumelogRepository {
         },
       }));
     } catch (error) {
-      throw wrapElasticsearchError(error);
+      throw wrapElasticsearchError(error, this.buildSearchDiagnostics('search_context_nearby', {
+        queryDigest: buildQueryHash({ app, host, from, to, limit, mode: 'timeWindow' }),
+        indicesCount: indices.length,
+        limit,
+        contextMode: 'timeWindow',
+      }));
     }
   }
 
@@ -532,12 +680,27 @@ export class PlumelogRepository {
         center._source?.[this.config.plumelog.fields.app],
         center._source?.[this.config.plumelog.fields.env],
       )) {
-        throw new AppError('FORBIDDEN', 403, {}, 'center log exceeds API key limit');
+        throw new AppError('POLICY_REJECTED', 403, {
+          reason: 'center_log_exceeds_limit',
+          centerIndex: request.center.index,
+        }, 'center log exceeds API key limit');
       }
     }
 
     const traceId = request.traceId ?? center?._source?.[this.config.plumelog.fields.traceId] ?? null;
-    const { indices, warnings } = await this.resolveExistingRunIndices(request.timeRange.from, request.timeRange.to, context);
+    const contextQueryDigest = buildQueryHash({
+      timeRange: request.timeRange,
+      center: request.center ?? null,
+      traceId,
+      limit: request.limit,
+      context: request.context ?? null,
+    });
+    const { indices, warnings } = await this.resolveExistingRunIndices(request.timeRange.from, request.timeRange.to, {
+      queryDigest: contextQueryDigest,
+      limit: request.limit,
+      centerIndex: request.center?.index,
+      contextMode: traceId ? 'traceId' : 'timeWindow',
+    }, context);
     if (indices.length === 0) {
       return {
         schema: 'plumelog.context.v1',

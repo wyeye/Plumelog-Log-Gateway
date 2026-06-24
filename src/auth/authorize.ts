@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config/schema.js';
 import { READ_SCOPES } from '../config/schema.js';
-import { AppError } from '../http/errors.js';
+import { AppError, policyRejected } from '../http/errors.js';
 import type { LogFilters } from '../schema/logFilters.js';
 import { readCredential } from './credentials.js';
 
@@ -71,7 +71,7 @@ export function requirePrincipal(request: FastifyRequest): AuthPrincipal {
 
 export function enforceScope(principal: AuthPrincipal, scope: AuthScope): void {
   if (!principal.scopes.includes(scope)) {
-    throw new AppError('FORBIDDEN', 403, { scope }, 'permission denied');
+    throw policyRejected('scope_missing', { scope }, 'permission denied');
   }
 }
 
@@ -83,7 +83,7 @@ function ensureTimeRangeLimit(principal: AuthPrincipal, request: PolicyRequest):
   const to = new Date(request.timeRange.to).getTime();
   const rangeHours = (to - from) / 3_600_000;
   if (Number.isFinite(rangeHours) && rangeHours > principal.maxTimeRangeHours) {
-    throw new AppError('FORBIDDEN', 403, { maxTimeRangeHours: principal.maxTimeRangeHours }, 'time range exceeds API key limit');
+    throw policyRejected('time_range_exceeds_limit', { maxTimeRangeHours: principal.maxTimeRangeHours }, 'time range exceeds API key limit');
   }
 }
 
@@ -93,7 +93,7 @@ export function enforceTimeRangePolicy(principal: AuthPrincipal, timeRange: { fr
 
 function ensureLimit(principal: AuthPrincipal, request: PolicyRequest): void {
   if (principal.maxLimit && request.limit && request.limit > principal.maxLimit) {
-    throw new AppError('FORBIDDEN', 403, { maxLimit: principal.maxLimit }, 'limit exceeds API key limit');
+    throw policyRejected('limit_exceeds_max', { maxLimit: principal.maxLimit }, 'limit exceeds API key limit');
   }
 }
 
@@ -110,7 +110,11 @@ function constrainValues(
   }
   const disallowed = requested.filter((item) => !allowed.includes(item));
   if (disallowed.length > 0) {
-    throw new AppError('FORBIDDEN', 403, { field: fieldName }, `${fieldName} exceeds API key limit`);
+    throw policyRejected('field_exceeds_limit', {
+      field: fieldName,
+      disallowed,
+      allowed,
+    }, `${fieldName} exceeds API key limit`);
   }
   return requested;
 }

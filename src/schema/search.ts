@@ -7,6 +7,7 @@ export const searchRequestSchema = z.object({
   limit: z.number().int().min(1).max(500),
   filters: logFiltersSchema,
   cursor: z.string().nullable().optional(),
+  contentMode: z.enum(['preview', 'full']).default('preview'),
 });
 
 export type SearchRequest = z.infer<typeof searchRequestSchema>;

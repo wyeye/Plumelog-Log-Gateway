@@ -17,7 +17,7 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 export function loadMcpConfig(): McpConfig {
   const gatewayBaseUrl = process.env.PLUMELOG_GATEWAY_BASE_URL?.trim() ?? 'http://127.0.0.1:8787';
   const apiToken = process.env.PLUMELOG_GATEWAY_TOKEN?.trim() ?? '';
-  const timeoutMs = parsePositiveInt(process.env.PLUMELOG_GATEWAY_TIMEOUT_MS?.trim(), 10_000);
+  const timeoutMs = parsePositiveInt(process.env.PLUMELOG_GATEWAY_TIMEOUT_MS?.trim(), 30_000);
 
   if (!apiToken) {
     throw new AppError('INVALID_CONFIG', 500, {}, 'PLUMELOG_GATEWAY_TOKEN is required');

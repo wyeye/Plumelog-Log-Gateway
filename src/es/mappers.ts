@@ -11,9 +11,10 @@ export interface GatewayWarning {
 
 export interface MapLogOptions {
   redactContent?: boolean;
+  contentMode?: 'preview' | 'full';
 }
 
-const SEARCH_COLUMNS = [
+const BASE_SEARCH_COLUMNS = [
   'index',
   'id',
   'timestamp',
@@ -24,9 +25,13 @@ const SEARCH_COLUMNS = [
   'host',
   'logger',
   'method',
-  'contentPreview',
-  'contentTruncated',
 ] as const;
+
+export function searchColumnsForMode(contentMode: MapLogOptions['contentMode']): string[] {
+  return contentMode === 'full'
+    ? [...BASE_SEARCH_COLUMNS, 'content']
+    : [...BASE_SEARCH_COLUMNS, 'contentPreview', 'contentTruncated'];
+}
 
 function safeIso(value: unknown): string {
   const date = new Date(typeof value === 'number' || typeof value === 'string' ? value : Date.now());
@@ -55,13 +60,12 @@ export function mapSearchResponse(
   const hits = response.hits?.hits ?? [];
   const hasMore = hits.length > limit;
   const pageHits = hits.slice(0, limit);
+  const contentMode = options.contentMode ?? 'preview';
   const rows = pageHits.map((hit: any) => {
     const source = hit._source ?? {};
-    const preview = buildContentPreview(
-      logContent(config, source, options),
-      config.limits.contentPreviewChars,
-    );
-    return [
+    const content = logContent(config, source, options);
+    const preview = buildContentPreview(content, config.limits.contentPreviewChars);
+    const baseRow = [
       String(hit._index ?? ''),
       String(hit._id ?? ''),
       safeIso(source[config.plumelog.fields.time]),
@@ -72,9 +76,11 @@ export function mapSearchResponse(
       source[config.plumelog.fields.host] ?? null,
       source[config.plumelog.fields.logger] ?? null,
       source[config.plumelog.fields.method] ?? null,
-      preview.contentPreview,
-      preview.contentTruncated,
     ];
+
+    return contentMode === 'full'
+      ? [...baseRow, content]
+      : [...baseRow, preview.contentPreview, preview.contentTruncated];
   });
   const lastSort = hasMore && pageHits.length > 0 ? pageHits[pageHits.length - 1].sort : null;
   const total = response.hits?.total;
@@ -104,7 +110,7 @@ export function mapSearchResponse(
           })
         : null,
     },
-    columns: [...SEARCH_COLUMNS],
+    columns: searchColumnsForMode(contentMode),
     rows,
     warnings,
   };
