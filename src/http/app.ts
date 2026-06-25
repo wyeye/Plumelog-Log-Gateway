@@ -135,7 +135,7 @@ export function buildApp(config: AppConfig): FastifyInstance {
     await repository.close();
   });
 
-  registerErrorHandler(app, config);
+  registerErrorHandler(app);
   registerHealthRoute(app, config, repository);
   registerMetaRoute(app, config, repository);
   registerSearchRoute(app, repository);

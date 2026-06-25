@@ -12,7 +12,7 @@ const apiKeySchema = z.object({
   allowedEnvs: z.array(z.string().min(1)).default([]),
   maxTimeRangeHours: z.number().positive().optional(),
   maxLimit: z.number().int().min(1).max(500).optional(),
-  allowRawContent: z.boolean().default(false),
+  allowRawContent: z.boolean().default(true),
 });
 
 const nullableNonEmptyStringSchema = z.preprocess(
@@ -84,7 +84,7 @@ export const configSchema = z.object({
     allowUnsignedV1: z.boolean().default(false),
   }).default({}),
   redaction: z.object({
-    enabled: z.boolean().default(true),
+    enabled: z.boolean().default(false),
     replacement: z.string().min(1).default('[REDACTED]'),
     maxInputChars: z.number().int().positive().default(200_000),
   }).default({}),

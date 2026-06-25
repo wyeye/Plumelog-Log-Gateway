@@ -339,7 +339,7 @@ export class PlumelogRepository {
   }
 
   private mapOptions(principal?: AuthPrincipal) {
-    return { redactContent: !(principal?.allowRawContent ?? false) };
+    return {};
   }
 
   async searchLogs(request: SearchRequest, principal?: AuthPrincipal, context?: RepositoryRequestContext) {

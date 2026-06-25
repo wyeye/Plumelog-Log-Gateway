@@ -1,7 +1,5 @@
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ZodError } from 'zod';
-import type { AppConfig } from '../config/schema.js';
-import { redactText } from '../security/redact.js';
 
 export class AppError extends Error {
   constructor(
@@ -167,7 +165,7 @@ export function wrapElasticsearchError(
   }), 'elasticsearch query failed');
 }
 
-export function registerErrorHandler(app: FastifyInstance, config: AppConfig): void {
+export function registerErrorHandler(app: FastifyInstance): void {
   app.setNotFoundHandler(async (request, reply) => {
     await reply.status(404).send({
       requestId: request.id,
@@ -210,7 +208,7 @@ export function registerErrorHandler(app: FastifyInstance, config: AppConfig): v
     app.log.error({
       requestId: request.id,
       errorName: error instanceof Error ? error.name : 'unknown',
-      errorMessage: redactText(error instanceof Error ? error.message : 'unknown error', config),
+      errorMessage: error instanceof Error ? error.message : 'unknown error',
     }, 'unhandled error');
     void reply.status(500).send({
       requestId: request.id,

@@ -1,5 +1,4 @@
 import type { AppConfig } from '../config/schema.js';
-import { redactText } from '../security/redact.js';
 import { buildContentPreview } from '../utils/content.js';
 import { encodeCursor, type SearchCursor } from './cursor.js';
 
@@ -10,7 +9,6 @@ export interface GatewayWarning {
 }
 
 export interface MapLogOptions {
-  redactContent?: boolean;
   contentMode?: 'preview' | 'full';
 }
 
@@ -44,8 +42,7 @@ function safeEpoch(value: unknown): number {
 }
 
 function logContent(config: AppConfig, source: Record<string, unknown>, options: MapLogOptions = {}): string {
-  const content = String(source[config.plumelog.fields.message] ?? '');
-  return options.redactContent === false ? content : redactText(content, config);
+  return String(source[config.plumelog.fields.message] ?? '');
 }
 
 export function mapSearchResponse(
