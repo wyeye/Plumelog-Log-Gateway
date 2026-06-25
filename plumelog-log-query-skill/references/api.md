@@ -89,8 +89,7 @@ API key 可配置 scope、allowedApps、allowedEnvs、maxTimeRangeHours 和 maxL
 - 错误统一返回 `error.code`、`error.message`、`error.details`。
 - HTTP 错误响应还包含顶层 `requestId` 和 `error.requestId`。
 - 无 token/错误 token 返回 HTTP `401` 且 `error.code=UNAUTHORIZED`；scope 或 API key policy 不允许返回 HTTP `403` 且 `error.code=POLICY_REJECTED`。
-- 默认启用脱敏；搜索 preview、context content、boundary preview 中的 token、Cookie、密码、JWT、邮箱、手机号、身份证号、银行卡号会被替换为 `[REDACTED:<type>]`。
-- `allowRawContent=false` 是默认值；只有 API key 显式设置 `allowRawContent=true` 时，完整正文映射才允许绕过脱敏。
+- 日志正文返回原始内容，不做脱敏处理。
 
 ## MCP Error Shape
 

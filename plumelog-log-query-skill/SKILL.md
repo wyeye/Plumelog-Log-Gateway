@@ -34,4 +34,4 @@ Use the Plumelog log gateway HTTP API or MCP tools to search logs without writin
 - 不默认展开大段异常堆栈。
 - 不把 `partialResult=true` 当作完整结论。
 - 不忽略 `POLICY_REJECTED`、`ES_TIMEOUT`、`INDEX_RESOLVE_TIMEOUT`、`CURSOR_INVALID` 这类错误码背后的具体诊断信息。
-- 不尝试绕过脱敏；只有网关 API key 显式允许 raw content 时才可能返回未脱敏正文。
+- 返回的日志正文为原始内容，不做脱敏处理。

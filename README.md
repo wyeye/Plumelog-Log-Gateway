@@ -49,7 +49,7 @@ Elasticsearch / Plumelog indices
 
 ## 配置示例
 
-最小可启动配置需要包含服务端口、API key、Elasticsearch 地址、Plumelog 索引/字段映射、查询限制和 meta 默认时间范围。未列出的 `search`、`cursor`、`redaction`、`observability`、`meta.appAggSize`、`meta.envAggSize`、`elasticsearch.indexResolveConcurrency` 都有默认值。
+最小可启动配置需要包含服务端口、API key、Elasticsearch 地址、Plumelog 索引/字段映射、查询限制和 meta 默认时间范围。未列出的 `search`、`cursor`、`observability`、`meta.appAggSize`、`meta.envAggSize`、`elasticsearch.indexResolveConcurrency` 都有默认值。
 
 ```yaml
 server:
@@ -93,7 +93,7 @@ meta:
   defaultTimeRangeHours: 24
 ```
 
-生产建议配置显式开启严格只读权限、游标签名、稳定分页 tie-breaker、脱敏、source filtering、ready 超时和慢查询阈值；`allowRawContent` 默认 `false`，只有确需返回未脱敏完整正文的专用 key 才建议单独设为 `true`。`NODE_ENV=production` 或 `runtime.production=true` 时，必须显式配置 `cursor.signingSecret` 和 `search.tieBreakerField`。
+生产建议配置显式开启严格只读权限、游标签名、稳定分页 tie-breaker、source filtering、ready 超时和慢查询阈值。`NODE_ENV=production` 或 `runtime.production=true` 时，必须显式配置 `cursor.signingSecret` 和 `search.tieBreakerField`。
 
 ```yaml
 runtime:
@@ -107,7 +107,6 @@ auth:
       allowedEnvs: ["prod"]
       maxTimeRangeHours: 6
       maxLimit: 100
-      allowRawContent: false
 elasticsearch:
   indexResolveConcurrency: 8
 search:
@@ -119,10 +118,6 @@ cursor:
   signingSecret: ${PLUMELOG_CURSOR_SECRET}
   ttlSeconds: 3600
   allowUnsignedV1: false
-redaction:
-  enabled: true
-  replacement: "[REDACTED]"
-  maxInputChars: 200000
 meta:
   appAggSize: 200
   envAggSize: 50
@@ -191,12 +186,11 @@ meta:
   envAggSize: 50
 ```
 
-## 权限、脱敏与审计
+## 权限与审计
 
 旧配置只需要 `name/token`，默认拥有全部只读 scope：`meta:read`、`logs:search`、`logs:context`、`logs:boundary`。生产环境可按 API key 收紧 scope、app/env、时间范围和 limit。
 
-默认启用日志脱敏，搜索 `contentPreview`、context `content`、boundary `contentPreview` 会遮盖 Authorization/Bearer、Cookie、password/passwd/pwd、secret、token/access_token/refresh_token、JWT、邮箱、手机号、身份证号和银行卡号。审计日志只记录计数与范围，不记录 token 或完整正文。
-若 API key 的 `allowRawContent=true`，context 等完整正文映射允许绕过脱敏；该选项应只给受控排障 key 使用，默认不要开启。
+日志正文返回原始内容，不做脱敏处理。审计日志只记录计数与范围，不记录 token 或完整正文。
 
 `/api/v1/logs/boundary` 示例：
 
@@ -235,7 +229,7 @@ meta:
 - `search_logs_all_pages`：自动持续追 `nextCursor`，直到取完所有分页，或命中 `maxPages` / `maxRows`。
 - `search_logs_auto`：先查整段；遇到 `GATEWAY_TIMEOUT`、`ES_TIMEOUT`、`INDEX_RESOLVE_TIMEOUT` 时自动按时间二分切片，并在每个切片内继续自动翻页。
 - `export_logs_csv`：复用 `search_logs_auto` 的自动切片与自动翻页能力，把聚合结果直接写到本地 CSV 文件；默认写到系统临时目录，也可显式指定 `outputPath`。
-- 普通 `search_logs` 和以上聚合工具都支持 `contentMode`：`preview` 返回 `contentPreview`，`full` 返回 `content`。是否脱敏仍受 API key 的 `allowRawContent` 控制。
+- 普通 `search_logs` 和以上聚合工具都支持 `contentMode`：`preview` 返回 `contentPreview`，`full` 返回 `content`。
 
 聚合工具返回对象包含：
 
